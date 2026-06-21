@@ -1,0 +1,183 @@
+1. Evidence Score (0-1)
+
+Create multiple evidence signals.
+
+Example signals
+Signal	Weight
+Quiz/Assessment	40%
+Question Quality	20%
+Study Completion	15%
+Retention Test	15%
+Projects/Exercises	10%
+
+Weights can be adjusted later.
+
+Quiz Score
+
+Simple:
+
+quiz_score = correct_answers / total_questions
+
+Example:
+
+8/10 = 0.8
+Study Completion
+completion =
+min(
+    duration_watched / expected_duration,
+    1
+)
+
+Example:
+
+Video:
+
+Expected: 60 mins
+Watched: 45 mins
+
+Score:
+
+0.75
+Question Quality
+
+You can use the LLM.
+
+Examples:
+
+Low-level question
+
+What is a probability distribution?
+
+0.3
+Understanding question
+
+Why is the normal distribution important in ML?
+
+0.7
+Deep reasoning
+
+Why does maximum likelihood estimation assume certain distributions?
+
+0.9
+
+Prompt:
+
+Rate this question from 0 to 1 based on how much it
+demonstrates conceptual understanding.
+Retention Score
+
+Ask a few questions after some time.
+
+Example:
+
+Immediate quiz:
+
+9/10
+
+One week later:
+
+6/10
+
+Retention:
+
+0.6
+Project/Exercise Score
+
+If user applies knowledge:
+
+Example:
+
+Uses Bayes Theorem
+in spam classifier project.
+
+This is strong evidence.
+
+Score:
+
+0.8-1.0
+Final Evidence Score
+
+Weighted average:
+
+Evidence =
+0.40*Quiz +
+0.20*QuestionQuality +
+0.15*Completion +
+0.15*Retention +
+0.10*Project
+
+Example:
+
+Quiz:
+
+0.8
+
+Question:
+
+0.7
+
+Completion:
+
+0.9
+
+Retention:
+
+0.6
+
+Project:
+
+0.5
+
+Result:
+
+0.4*0.8
++
+0.2*0.7
++
+0.15*0.9
++
+0.15*0.6
++
+0.1*0.5
+
+=
+
+0.735
+
+Evidence:
+
+0.74
+Updating Mastery
+
+Current:
+
+Probability Distribution = 0.30
+
+Evidence:
+
+0.74
+
+Formula:
+
+NewMastery =
+OldMastery*(1-α)
++
+Evidence*α
+
+Where:
+
+α = 0.2
+
+Result:
+
+0.30*0.8
++
+0.74*0.2
+
+=
+
+0.388
+
+Mastery:
+
+0.39

@@ -1,0 +1,648 @@
+import json
+import logging
+import os
+from typing import Any, Dict, List, Optional
+
+from content_loader import fetch_source_content
+from cv_agent import generate_cv_latex
+from database_tools import (
+    create_study_session,
+    get_conn,
+    get_or_create_resource,
+    get_or_create_topic,
+    run_full_pipeline,
+    save_quiz_results,
+)
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from general_assistant import handle_query
+from llm_utils import (
+    extract_topics_from_content,
+    generate_quiz_multi,
+    summarize_content_chunks,
+)
+from pydantic import BaseModel, Field
+from qdrant_helper import (
+    get_chunks_for_session,
+    is_qdrant_available,
+    search_similar_topics,
+    upsert_session,
+    upsert_session_chunks,
+)
+from recommendation_agent import (
+    generate_roadmap_for_user,
+    get_weakness_topics,
+    recommend_topics_for_user,
+)
+from session_chatbot import chat_session
+
+# Load environment variables safely
+ROOT = os.path.dirname(os.path.dirname(__file__))
+DOTENV_PATH = os.path.join(ROOT, ".env")
+load_dotenv(DOTENV_PATH)
+
+logger = logging.getLogger(__name__)
+api = FastAPI(title="Quiz Agent API")
+
+# Backwards-compatible alias
+recommend_next_topics = recommend_topics_for_user
+
+# --- Shared Semantic Utilities ---
+
+
+def get_canonical_topic_name(topic_name: str) -> str:
+    """Resolves a topic name to its canonical version via Qdrant semantic matching."""
+    if not is_qdrant_available():
+        return topic_name.strip()
+
+    threshold = float(os.getenv("TOPIC_MATCH_THRESHOLD", "0.75"))
+    try:
+        hits = search_similar_topics(topic_name, limit=1)
+        if hits and hits[0].get("score", 0) >= threshold:
+            return hits[0].get("name") or topic_name
+    except Exception as e:
+        logger.error("Failed semantic topic search for %s: %s", topic_name, e)
+
+    return topic_name
+
+
+# --- Pydantic Schemas ---
+class ContentPrepareRequest(BaseModel):
+    source_type: str = "youtube"
+    url: str
+    user_id: Optional[int] = None
+    create_session: Optional[bool] = False
+
+
+class ContentPrepareResponse(BaseModel):
+    source_type: str
+    source_url: str
+    video_id: Optional[str] = None
+    title: str
+    channel: Optional[str] = None
+    duration_minutes: float
+    description: str
+    content_chunks: List[str]
+    topics: List[str]
+    session_id: Optional[int] = None
+    session_summary: Optional[str] = None
+    session_error: Optional[str] = None
+
+
+class QuizGenerateRequest(BaseModel):
+    title: str
+    topic_names: List[str]
+    content_chunks: Optional[List[str]] = None
+    num_questions_total: Optional[int] = None
+
+
+class TopicQuiz(BaseModel):
+    topic_name: str
+    quiz: Dict[str, Any]
+
+
+class QuizGenerateResponse(BaseModel):
+    topic_quizzes: List[TopicQuiz]
+
+
+class SessionTopicResult(BaseModel):
+    topic_name: str
+    topic_id: Optional[int] = None
+    domain_topic_id: Optional[int] = None
+    quiz_score: float = Field(..., ge=0.0, le=1.0)
+    study_completion: float = Field(..., ge=0.0, le=1.0)
+
+
+class SessionCompleteRequest(BaseModel):
+    user_id: int
+    session_id: Optional[int] = None
+    resource_id: Optional[int] = None
+    resource_url: Optional[str] = None
+    resource_title: Optional[str] = None
+    duration_minutes: Optional[float] = None
+    topic_name: Optional[str] = None
+    source_type: Optional[str] = None
+    session_summary: str
+    topic_results: List[SessionTopicResult]
+    content_chunks: Optional[List[str]] = None
+
+
+class SessionCompleteResponse(BaseModel):
+    session_id: int
+    topic_updates: List[Dict[str, Any]]
+
+
+class RecommendRequest(BaseModel):
+    user_id: int
+    max_recs: int = 5
+    goals: Optional[List[str]] = None
+
+
+class RecommendItem(BaseModel):
+    topic_id: int
+    name: Optional[str] = None
+    score: float
+    metrics: Optional[Dict[str, Any]] = None
+    reasons: Optional[List[str]] = None
+
+
+class RecommendResponse(BaseModel):
+    recommendations: List[RecommendItem]
+
+
+class AssistantRequest(BaseModel):
+    user_id: int
+    query: str
+    max_recs: int = 5
+
+
+class SessionChatRequest(BaseModel):
+    user_id: int
+    session_id: int
+    query: str
+    max_chunks: int = 8
+
+
+class RoadmapRequest(BaseModel):
+    user_id: int
+    steps: int = 6
+    goal_text: Optional[str] = None
+
+
+class DebugSessionChunksRequest(BaseModel):
+    session_id: int
+
+
+class CVGenerateRequest(BaseModel):
+    user_id: int
+    template_name: Optional[str] = "simple_cv"
+
+
+class CVGenerateResponse(BaseModel):
+    tex_path: str
+    latex: Optional[str]
+
+
+# --- Endpoints ---
+
+
+@api.post("/content/prepare", response_model=ContentPrepareResponse)
+def content_prepare(request: ContentPrepareRequest):
+    result = fetch_source_content.invoke(
+        {"source_type": request.source_type, "url": request.url}
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    extracted_topics = extract_topics_from_content(
+        result["title"], result.get("content_chunks", [])
+    )
+    if not extracted_topics:
+        extracted_topics = [result["title"]]
+
+    # Canonicalize via deduplication function
+    topics: list[str] = []
+    for t in extracted_topics:
+        canonical_name = get_canonical_topic_name(t)
+        if canonical_name and canonical_name not in topics:
+            topics.append(canonical_name)
+
+    # Sync topics to database
+    for t in topics:
+        try:
+            get_or_create_topic.invoke(
+                {
+                    "topic_name": t,
+                    "create_if_missing": True,
+                    "topic_type": "Concept",
+                }
+            )
+        except Exception:
+            pass
+
+    session_id = None
+    session_summary = None
+    session_error = None
+
+    if request.user_id and request.create_session:
+        try:
+            session_summary = summarize_content_chunks(
+                result["title"], result.get("content_chunks", [])
+            )
+        except Exception:
+            session_summary = result.get("title", "")
+
+        try:
+            res_payload = {
+                "url": request.url or "",
+                "title": result.get("title") or request.url,
+                "duration_minutes": result.get("duration_minutes", 0.0),
+                "topic_name": (topics or [None])[0],
+                "source_type": request.source_type,
+            }
+            resource_result = get_or_create_resource.invoke(res_payload)
+            resource_id = resource_result.get("resource_id")
+
+            if (
+                not resource_id
+                and isinstance(resource_result, dict)
+                and resource_result.get("error")
+            ):
+                try:
+                    fallback = res_payload.copy()
+                    fallback["topic_name"] = None
+                    resource_result = get_or_create_resource.invoke(fallback)
+                    resource_id = resource_result.get("resource_id")
+                except Exception as e:
+                    resource_id = None
+                    session_error = (
+                        (session_error or "")
+                        + f"resource_fallback_error: {e}; "
+                    )
+
+            if not resource_id:
+                err = (
+                    resource_result.get("error")
+                    if isinstance(resource_result, dict)
+                    else None
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": "resource_creation_failed",
+                        "details": err,
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            resource_id = None
+            session_error = (
+                (session_error or "") + f"resource_lookup_error: {e}; "
+            )
+
+        # Safely interact with Database Connection Pool
+        try:
+            if resource_id is not None:
+                conn = get_conn()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT SessionId FROM StudySessions WHERE UserId = ? AND ResourceId = ?",
+                            request.user_id,
+                            resource_id,
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            session_id = int(row[0])
+                        else:
+                            session_result = create_study_session.invoke(
+                                {
+                                    "user_id": request.user_id,
+                                    "resource_id": resource_id,
+                                    "summary": session_summary or "",
+                                }
+                            )
+                            session_id = session_result.get("session_id")
+                finally:
+                    conn.close()
+            else:
+                session_id = None
+                session_error = (
+                    (session_error or "")
+                    + "resource_missing: resource creation failed; session not created."
+                )
+        except Exception as e:
+            session_id = None
+            session_error = (
+                (session_error or "") + f"create_session_error: {e}; "
+            )
+
+        # Vector Embeddings Upserting
+        try:
+            if session_id and is_qdrant_available():
+                try:
+                    upsert_session(
+                        session_id=session_id,
+                        user_id=request.user_id,
+                        topics=topics,
+                        session_summary=session_summary or "",
+                        quiz_score=0.0,
+                    )
+                except Exception as e:
+                    session_error = (
+                        (session_error or "") + f"qdrant_upsert_error: {e}; "
+                    )
+
+                try:
+                    content_chunks = result.get("content_chunks", []) or []
+                    if content_chunks:
+                        upsert_session_chunks(
+                            session_id=session_id,
+                            user_id=request.user_id,
+                            content_chunks=content_chunks,
+                            topics=topics,
+                        )
+                except Exception as e:
+                    session_error = (
+                        (session_error or "")
+                        + f"qdrant_chunk_upsert_error: {e}; "
+                    )
+        except Exception as e:
+            session_error = (
+                (session_error or "") + f"qdrant_check_error: {e}; "
+            )
+
+    return {
+        "source_type": result.get("source_type", request.source_type),
+        "source_url": request.url,
+        "video_id": result.get("video_id"),
+        "title": result["title"],
+        "channel": result.get("channel"),
+        "duration_minutes": result.get("duration_minutes", 0.0),
+        "description": result.get("description", ""),
+        "content_chunks": result.get("content_chunks", []),
+        "topics": topics,
+        "session_id": session_id,
+        "session_summary": session_summary,
+        "session_error": session_error,
+    }
+
+
+class PdfPrepareRequest(BaseModel):
+    url: str
+    user_id: Optional[int] = None
+    create_session: Optional[bool] = False
+
+
+@api.post("/content/prepare/pdf", response_model=ContentPrepareResponse)
+def content_prepare_pdf(request: PdfPrepareRequest):
+    prep_req = ContentPrepareRequest(
+        source_type="pdf",
+        url=request.url,
+        user_id=request.user_id,
+        create_session=request.create_session,
+    )
+    return content_prepare(prep_req)
+
+
+@api.post("/quiz/generate", response_model=QuizGenerateResponse)
+def quiz_generate(request: QuizGenerateRequest):
+    if not request.content_chunks:
+        raise HTTPException(status_code=400, detail="content_chunks is required")
+
+    DEFAULT_TOTAL_CAP = 20
+    PER_TOPIC_CAP = 5
+
+    if request.num_questions_total and request.num_questions_total > 0:
+        total_requested = min(request.num_questions_total, DEFAULT_TOTAL_CAP)
+    else:
+        total_requested = min(
+            DEFAULT_TOTAL_CAP,
+            max(1, len(request.topic_names) * PER_TOPIC_CAP),
+        )
+
+    result = generate_quiz_multi.invoke(
+        {
+            "title": request.title,
+            "topic_names": request.topic_names,
+            "content_chunks": request.content_chunks,
+            "num_questions_total": total_requested,
+            "per_topic_cap": PER_TOPIC_CAP,
+        }
+    )
+    return {"topic_quizzes": result}
+
+
+@api.post("/session/complete", response_model=SessionCompleteResponse)
+def session_complete(request: SessionCompleteRequest):
+    if not request.session_id:
+        raise HTTPException(
+            status_code=400,
+            detail="session_id is required. Create the session via /content/prepare with create_session=true.",
+        )
+
+    resource_id = request.resource_id
+    if not resource_id:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ResourceId FROM StudySessions WHERE SessionId = ?",
+                    request.session_id,
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    resource_id = row[0]
+                else:
+                    logger.warning(
+                        "session_complete: SessionId=%s has no ResourceId",
+                        request.session_id,
+                    )
+        except Exception:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to resolve ResourceId from StudySessions",
+            )
+        finally:
+            conn.close()
+
+    session_id = request.session_id
+    topic_updates: List[Dict[str, Any]] = []
+
+    for item in request.topic_results:
+        tid = item.topic_id
+        dom_id = item.domain_topic_id
+
+        if not tid and is_qdrant_available():
+            threshold = float(os.getenv("TOPIC_MATCH_THRESHOLD", "0.75"))
+            try:
+                hits = search_similar_topics(item.topic_name, limit=1)
+                if hits and hits[0].get("score", 0) >= threshold:
+                    tid = hits[0].get("topic_id")
+                    dom_id = hits[0].get("domain_topic_id")
+            except Exception:
+                tid = None
+
+        if not tid:
+            topic_result = get_or_create_topic.invoke(
+                {
+                    "topic_name": item.topic_name,
+                    "create_if_missing": True,
+                    "topic_type": "Concept",
+                }
+            )
+            if "error" in topic_result:
+                raise HTTPException(
+                    status_code=400, detail=topic_result["error"]
+                )
+            tid = topic_result.get("topic_id")
+            dom_id = topic_result.get("domain_topic_id")
+
+        evidence = save_quiz_results.invoke(
+            {
+                "session_id": session_id,
+                "topic_id": tid,
+                "quiz_score": item.quiz_score,
+                "study_completion": item.study_completion,
+            }
+        )
+
+        pipeline_payload = run_full_pipeline.invoke(
+            {
+                "user_id": request.user_id,
+                "session_id": session_id,
+                "topic_id": tid,
+                "domain_topic_id": dom_id,
+                "topic_name": item.topic_name,
+                "session_summary": request.session_summary,
+                "quiz_score": item.quiz_score,
+            }
+        )
+
+        try:
+            pipeline_data = json.loads(pipeline_payload)
+        except Exception:
+            pipeline_data = {"raw_payload": pipeline_payload}
+
+        topic_updates.append(
+            {
+                "topic_name": item.topic_name,
+                "topic_id": tid,
+                "domain_topic_id": dom_id,
+                "quiz_score": item.quiz_score,
+                "evidence": evidence,
+                "pipeline": pipeline_data,
+            }
+        )
+
+    resource_url = request.resource_url
+    source_type = request.source_type or None
+
+    if not resource_url and resource_id:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT Url, SourceType FROM Resources WHERE ResourceId = ?",
+                    resource_id,
+                )
+                row = cur.fetchone()
+                if row:
+                    resource_url = row[0]
+                    source_type = row[1] or source_type
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    chunks = request.content_chunks or []
+    if not chunks and resource_url:
+        try:
+            result = fetch_source_content.invoke(
+                {"source_type": source_type or "youtube", "url": resource_url}
+            )
+            if isinstance(result, dict):
+                chunks = result.get("content_chunks", [])
+        except Exception:
+            chunks = []
+
+    if chunks:
+        try:
+            topics_list = (
+                [tr["topic_name"] for tr in request.topic_results]
+                if request.topic_results
+                else []
+            )
+            upsert_session_chunks(
+                session_id=session_id,
+                user_id=request.user_id,
+                content_chunks=chunks,
+                topics=topics_list,
+            )
+        except Exception as e:
+            logger.warning("upsert_session_chunks failed: %s", e)
+
+    return {"session_id": session_id, "topic_updates": topic_updates}
+
+
+@api.post("/recommend/topics", response_model=RecommendResponse)
+def recommend_topics(request: RecommendRequest):
+    payload = {"user_id": request.user_id, "max_recs": request.max_recs}
+    if request.goals:
+        payload["goal_texts"] = request.goals
+    result = recommend_topics_for_user.invoke(payload)
+    return {"recommendations": result.get("recommendations", [])}
+
+
+@api.post("/recommend/weaknesses", response_model=RecommendResponse)
+def recommend_weaknesses(request: RecommendRequest):
+    result = get_weakness_topics.invoke(
+        {"user_id": request.user_id, "max_recs": request.max_recs}
+    )
+    return {"recommendations": result.get("recommendations", [])}
+
+
+@api.post("/assistant/query")
+def assistant_query(request: AssistantRequest):
+    result = handle_query(request.user_id, request.query, request.max_recs)
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(status_code=500, detail=result)
+    return result
+
+
+@api.post("/assistant/session_query")
+def assistant_session_query(request: SessionChatRequest):
+    result = chat_session.invoke(
+        {
+            "user_id": request.user_id,
+            "session_id": request.session_id,
+            "query": request.query,
+            "max_chunks": request.max_chunks,
+        }
+    )
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
+@api.post("/recommend/roadmap")
+def recommend_roadmap(request: RoadmapRequest):
+    payload = {"user_id": request.user_id, "steps": request.steps}
+    if request.goal_text:
+        payload["goal_text"] = request.goal_text
+    result = generate_roadmap_for_user.invoke(payload)
+    return {"roadmap": result.get("roadmap", [])}
+
+
+# Changed from async def to standard def since internal call blocks synchronous execution
+@api.post("/debug/session_chunks")
+def debug_session_chunks(req: DebugSessionChunksRequest):
+    if not is_qdrant_available():
+        raise HTTPException(status_code=503, detail="Qdrant not available")
+
+    chunks = get_chunks_for_session(req.session_id)
+    if not chunks:
+        return {"session_id": req.session_id, "chunks_found": 0, "chunks": []}
+
+    return {
+        "session_id": req.session_id,
+        "chunks_found": len(chunks),
+        "chunks": chunks,
+    }
+
+
+@api.post("/cv/generate", response_model=CVGenerateResponse)
+def cv_generate(req: CVGenerateRequest):
+    try:
+        tex_path, latex = generate_cv_latex(
+            req.user_id, template_name=req.template_name
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate CV: {e}"
+        )
+
+    return {"tex_path": tex_path, "latex": latex}

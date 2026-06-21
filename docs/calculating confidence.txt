@@ -1,0 +1,189 @@
+2. Confidence Score
+
+Confidence is different.
+
+This measures:
+
+How much evidence do we have that the mastery estimate is accurate?
+
+Example
+User A
+
+One quiz.
+
+Mastery = 0.8
+
+Confidence:
+
+0.2
+User B
+
+20 quizzes
+10 projects
+50 questions
+
+Mastery = 0.8
+
+Confidence:
+
+0.95
+
+Same mastery.
+
+Different confidence.
+
+Confidence Signals
+Signal	Weight
+Number of Sessions	30%
+Number of Assessments	30%
+Recency	20%
+Consistency	20%
+Session Count
+
+Normalize:
+
+SessionScore =
+min(
+    sessions/20,
+    1
+)
+
+20 sessions gives:
+
+1.0
+Assessment Count
+AssessmentScore =
+min(
+    assessments/10,
+    1
+)
+Recency
+
+Knowledge decays.
+
+Example:
+
+DaysSinceStudy = 5
+
+Score:
+
+exp(-days/60)
+
+After:
+
+60 days:
+
+0.37
+Consistency
+
+Low variance:
+
+Quiz Scores:
+
+0.7
+0.8
+0.75
+0.8
+
+High confidence.
+
+Large swings:
+
+0.1
+0.9
+0.2
+0.95
+
+Low confidence.
+
+One way:
+
+Consistency =
+1 - normalized_std_dev
+Final Confidence
+Confidence =
+0.3*SessionScore
++
+0.3*AssessmentScore
++
+0.2*RecencyScore
++
+0.2*ConsistencyScore
+Example
+
+Sessions:
+
+10 → 0.5
+
+Assessments:
+
+6 → 0.6
+
+Recency:
+
+5 days → 0.92
+
+Consistency:
+
+0.8
+
+Confidence:
+
+0.3*0.5
++
+0.3*0.6
++
+0.2*0.92
++
+0.2*0.8
+
+=
+
+0.674
+
+Confidence:
+
+0.67
+What I'd Store
+UserTopicMastery
+----------------
+UserId
+TopicId
+Mastery
+Confidence
+Interest
+EvidenceCount
+LastUpdated
+
+Example:
+
+Topic	Mastery	Confidence
+Probability Distribution	0.39	0.67
+Bayes Theorem	0.20	0.30
+Recommendation Usage
+
+I would also incorporate confidence:
+
+Priority =
+(RequiredMastery - Mastery)
+× Confidence
+× Interest
+× CareerRelevance
+
+because:
+
+Mastery = 0.2
+Confidence = 0.9
+
+means:
+
+We know with high certainty the user is weak.
+
+while:
+
+Mastery = 0.2
+Confidence = 0.1
+
+means:
+
+We don't have enough evidence yet and should gather more information before making strong recommendations.

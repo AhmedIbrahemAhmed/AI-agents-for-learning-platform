@@ -1,0 +1,499 @@
+{
+	"info": {
+		"_postman_id": "bd173a7f-041f-4301-96ab-3c6097264ef5",
+		"name": "Claude Version API Tests",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "31926500"
+	},
+	"item": [
+		{
+			"name": "Content Prepare (no session)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+							"pm.test('Response has topics', function () { var json = pm.response.json(); pm.expect(json.topics).to.be.an('array'); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"source_type\": \"youtube\",\n  \"url\": \"https://youtu.be/zUUkiEllHG0?si=U5SP5o8T9jepJNui\",\n  \"user_id\": 2,\n  \"create_session\": false\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/content/prepare",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"content",
+						"prepare"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Content Prepare (create session)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+							"var json = pm.response.json();",
+							"pm.test('Set session_id if present', function () { if (json.session_id) { pm.environment.set('session_id', json.session_id); } pm.expect(json).to.have.property('session_summary'); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"source_type\": \"youtube\",\n  \"url\": \"https://youtu.be/zUUkiEllHG0?si=U5SP5o8T9jepJNui\",\n  \"user_id\": 2,\n  \"create_session\": true\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/content/prepare",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"content",
+						"prepare"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Content Prepare (PDF)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+							"var json = pm.response.json();",
+							"pm.test('Set session_id if present', function () { if (json.session_id) { pm.environment.set('session_id', json.session_id); } pm.expect(json).to.have.property('session_summary'); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"url\": \"https://example.com/sample.pdf\",\n  \"user_id\": 2,\n  \"create_session\": true\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/content/prepare/pdf",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"content",
+						"prepare",
+						"pdf"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Session Complete",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"if(!pm.environment.get('session_id')){ throw new Error('session_id not set in environment. Run prepare with create_session=true first.'); }"
+						],
+						"type": "text/javascript"
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+							"pm.test('Response contains topic_updates', function(){ var j=pm.response.json(); pm.expect(j.topic_updates).to.be.an('array'); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"user_id\": 2,\n  \"session_id\": {{session_id}},\n  \"session_summary\": \"sample summary\",\n  \"topic_results\": [ { \"topic_name\": \"Neural Networks\", \"quiz_score\": 0.8, \"study_completion\": 0.9 } ]\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/session/complete",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"session",
+						"complete"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Assistant Session Query",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200', function(){ pm.response.to.have.status(200); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{ \"user_id\": 2, \"session_id\": {{session_id}}, \"query\": \"What did I learn?\" }"
+				},
+				"url": {
+					"raw": "{{base_url}}/assistant/session_query",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"assistant",
+						"session_query"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Recommend Topics",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200', function(){ pm.response.to.have.status(200); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{ \"user_id\": 2, \"max_recs\": 5 }"
+				},
+				"url": {
+					"raw": "{{base_url}}/recommend/topics",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"recommend",
+						"topics"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Recommend Weaknesses",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200', function(){ pm.response.to.have.status(200); });",
+							"var j = pm.response.json();",
+							"pm.test('Has recommendations array', function(){ pm.expect(j.recommendations).to.be.an('array'); });",
+							"pm.test('Recommendations include metrics and reasons', function(){ if(j.recommendations && j.recommendations.length>0){ pm.expect(j.recommendations[0]).to.have.property('metrics'); pm.expect(j.recommendations[0]).to.have.property('reasons'); }});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{ \"user_id\": 2, \"max_recs\": 5 }"
+				},
+				"url": {
+					"raw": "{{base_url}}/recommend/weaknesses",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"recommend",
+						"weaknesses"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Recommend Roadmap",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200', function(){ pm.response.to.have.status(200); });",
+							"var j = pm.response.json();",
+							"pm.test('Roadmap present', function(){ pm.expect(j.roadmap).to.be.an('array'); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{ \"user_id\": 2, \"steps\": 6, \"goal_text\": \"I want to be a dotnet developer\" }"
+				},
+				"url": {
+					"raw": "{{base_url}}/recommend/roadmap",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"recommend",
+						"roadmap"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Quiz Generate",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200', function(){ pm.response.to.have.status(200); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{ \"title\": \"Test Title\", \"topic_names\": [\"Neural Networks\"], \"content_chunks\": [\"chunk1\", \"chunk2\"] }"
+				},
+				"url": {
+					"raw": "{{base_url}}/quiz/generate",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"quiz",
+						"generate"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "CV Generate",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200', function(){ pm.response.to.have.status(200); });",
+							"var j = pm.response.json(); pm.test('Has tex_path', function(){ pm.expect(j).to.have.property('tex_path'); });"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{ \"user_id\": 1, \"template_name\": \"simple_cv\" }"
+				},
+				"url": {
+					"raw": "{{base_url}}/cv/generate",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"cv",
+						"generate"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Debug Session Chunks",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"if(!pm.environment.get('session_id')){ throw new Error('session_id not set in environment. Run prepare with create_session=true first.'); }"
+						],
+						"type": "text/javascript"
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status 200', function(){ pm.response.to.have.status(200); });",
+							"var j = pm.response.json();",
+							"pm.test('chunks_found present', function(){ pm.expect(j).to.have.property('chunks_found'); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{ \"session_id\": {{session_id}} }"
+				},
+				"url": {
+					"raw": "{{base_url}}/debug/session_chunks",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"debug",
+						"session_chunks"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Content Prepare (blog)",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\r\n  \"source_type\": \"blog\",\r\n  \"url\": \"https://www.geeksforgeeks.org/dsa/quick-sort-algorithm/\",\r\n  \"user_id\": 2,\r\n  \"create_session\": false\r\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "{{base_url}}/content/prepare",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"content",
+						"prepare"
+					]
+				}
+			},
+			"response": []
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8000"
+		},
+		{
+			"key": "session_id",
+			"value": ""
+		}
+	]
+}

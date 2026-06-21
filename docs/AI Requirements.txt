@@ -1,0 +1,170 @@
+1- extract topic and info from video or blog to see what the user is studying
+2- give him/her exam about the studied topic and keep him locked untill he finish studying and solving the exam
+3- update the user data by adding the new topic if its new or updating the topic mastery or progress etc based on the topic depth and content and users score in the test 
+4- relate similar topics together if they are under the same field ie binary search and dynamic programming under algorithms etc and have a somehow tree relationship between topics
+5- give an overview of the user mastery over specific field like machine learning based on his score in the related topics under this field
+6- recommend topic to study or focus at given the user topics data
+7- (optional) agent to create cv for the user based on his data
+
+////
+Agents:
+
+1. Profile Agent
+
+Responsibilities:
+
+Topic Extraction
+What topics were studied?
+Mastery Estimation
+How much was learned?
+Weakness Detection
+What concepts are weak?
+Updates
+UserTopicMastery
+Evidence
+Interest
+Confidence
+
+2. Recommendation Agent
+
+Inputs:
+
+Goals
+Mastery
+Topic Graph
+Weaknesses
+Study History
+
+Outputs:
+
+What to study next
+Recommended resources
+Learning path
+Topic grouping
+
+
+3. Assistant Agent
+
+Responsibilities:
+
+Chat with user
+Answer questions
+Retrieve memories
+Explain concepts
+Call other agents
+
+No database updates.
+
+
+4. Career Agent (optional)
+
+Inputs:
+
+Projects
+Mastery
+Goals
+Certificates
+
+Outputs:
+
+CV
+LinkedIn Summary
+Career Advice
+Skill Gap Analysis
+
+
+////
+Update Mechanism
+User studies:
+Probability Distributions for ML
+Step 1
+
+Insert:
+
+StudySession
+Step 2
+
+Generate:
+
+Session Summary
+
+Embed and store in:
+
+Qdrant.SessionEmbeddings
+Step 3
+
+Profile Agent extracts:
+
+Probability Distribution
+Normal Distribution
+PDF
+PMF
+Step 4
+
+Collect evidence:
+
+Study Time
+Quiz Score
+Questions
+Retention Test
+Projects
+Step 5
+
+Compute evidence score:
+
+0-1
+
+Example:
+
+0.75
+Step 6
+
+Update mastery:
+
+NewMastery =
+OldMastery × 0.8 +
+EvidenceScore × 0.2
+Step 7
+
+Update confidence:
+
+Confidence += evidence_count
+Step 8
+
+Recompute aggregates:
+
+Probability Distribution = 0.65
+Bayes Theorem = 0.20
+MLE = 0.10
+
+↓
+
+Statistics = weighted average
+
+↓
+
+Machine Learning Readiness = weighted average
+
+/////
+Recommendation Example
+
+User Goal:
+
+Become ML Engineer
+
+Current:
+
+Statistics
+ ├── Probability Distribution = 0.65
+ ├── Bayes Theorem = 0.20
+ └── Hypothesis Testing = 0.15
+
+Recommendation Agent:
+
+Next Topics:
+1. Bayes Theorem
+2. Hypothesis Testing
+3. Statistical Inference
+
+Reason:
+These are direct prerequisites for later ML concepts.

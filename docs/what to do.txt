@@ -1,0 +1,4 @@
+i created database called GraduationProject with some tables
+i need to revise those tables, choose their relationships and fks
+also i will need to create qdrant vectordb with its tables
+and finally create the agents and test them on those 2 databases

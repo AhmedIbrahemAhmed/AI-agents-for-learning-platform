@@ -1,0 +1,77 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+
+# IDEs
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+secrets/
+credentials.json
+*.pem
+*.key
+
+# Database files
+*.sqlite3
+*.db
+
+# Outputs and build artifacts
+outputs/
+outputs/**
+build/
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Binary/compiled
+*.so
+*.dll
+
+# Optional caches
+.trafilatura-cache/
+
+# Ignore local launchers or system-specific files
+*.swp
+*~
+previous files/
+# End of .gitignore

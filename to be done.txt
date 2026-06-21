@@ -1,0 +1,1 @@
+i need to see if i will save summary of resource content in qdrant and when to save it exactly
