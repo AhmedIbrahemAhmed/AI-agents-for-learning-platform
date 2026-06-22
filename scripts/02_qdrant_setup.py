@@ -31,6 +31,8 @@ COLLECTIONS = [
 
 # Add TopicEmbeddings for canonical topic vectors
 COLLECTIONS.append("TopicEmbeddings")
+# Add collection for persisted chat turns (conversation history)
+COLLECTIONS.append("SessionChatHistory")
 
 
 def create(name: str):
@@ -91,6 +93,12 @@ idx("SessionChunkEmbeddings", "session_id", PayloadSchemaType.INTEGER)
 idx("SessionChunkEmbeddings", "chunk_index", PayloadSchemaType.INTEGER)
 idx("SessionChunkEmbeddings", "user_id", PayloadSchemaType.INTEGER)
 idx("SessionChunkEmbeddings", "topics", PayloadSchemaType.KEYWORD)
+
+# Indexes for SessionChatHistory
+idx("SessionChatHistory", "session_id", PayloadSchemaType.INTEGER)
+idx("SessionChatHistory", "turn_index", PayloadSchemaType.INTEGER)
+idx("SessionChatHistory", "role", PayloadSchemaType.KEYWORD)
+idx("SessionChatHistory", "user_id", PayloadSchemaType.INTEGER)
 
 print("\nQdrant MVP setup complete.")
 

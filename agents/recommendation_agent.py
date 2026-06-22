@@ -10,6 +10,12 @@ from qdrant_helper import (
     is_qdrant_available,
 )
 from qdrant_helper import search_session_chunks
+from qdrant_helper import search_similar_topics
+import json
+import os
+from pydantic import SecretStr
+from langchain_groq import ChatGroq
+from langchain_core.messages import HumanMessage
 
 
 def _fetch_user_topics(conn, user_id: int) -> List[Dict[str, Any]]:
@@ -113,7 +119,7 @@ def _weakness_topics(conn, user_id: int, max_recs: int = 5) -> List[Dict[str, An
 
 
 @tool
-def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optional[List[str]] = None) -> Dict[str, Any]:
+def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optional[List[str]] = None, enable_llm: bool = True, similarity_threshold: float = 0.65) -> Dict[str, Any]:
     """Recommend topics for a user, considering goals and studied topics. Returns topics ranked by relevance (0..1)."""
     conn = get_conn()
     try:
@@ -204,6 +210,71 @@ def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optio
                         candidates[key].setdefault("q_scores", []).append(ch.get("score", 0.0))
             except Exception:
                 # Ignore Qdrant failures and proceed with SQL-only candidates
+                pass
+
+        # Augment with LLM-generated candidates when candidate pool is small
+        try:
+            pool_size = len(candidates)
+        except Exception:
+            pool_size = 0
+
+        if enable_llm and pool_size < max(3, max_recs) and (goals_local):
+            try:
+                # Build a prompt to produce candidate topic names relevant to the user's goals
+                studied_names = ", ".join([t.get("name") for t in user_topics if t.get("name")]) or ""
+                joined_goals = "; ".join([g for g in goals_local if g])
+                prompt = (
+                    f"You are a concise curriculum assistant. The user's studied topics: {studied_names}. "
+                    f"User goal(s): {joined_goals}.\n"
+                    f"Return a JSON array of up to {max(8, max_recs*2)} short topic names strictly relevant to the goal(s). "
+                    f"Do not include explanations, numbering, or markdown — only a JSON array of strings."
+                )
+
+                llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=SecretStr(os.getenv("GROQ_API_KEY") or ""), temperature=0.0)
+                resp = llm.invoke([HumanMessage(content=prompt)])
+                raw_output = resp.content
+                if isinstance(raw_output, list):
+                    raw_output = " ".join(str(r) for r in raw_output)
+                raw = str(raw_output).strip()
+                if raw.startswith("```json"):
+                    raw = raw.split("```json", 1)[1].rsplit("```", 1)[0].strip()
+                elif raw.startswith("```"):
+                    raw = raw.split("```", 1)[1].rsplit("```", 1)[0].strip()
+                raw = raw.strip('`')
+                gen = json.loads(raw)
+                if isinstance(gen, list):
+                    # verify and insert generated candidates
+                    primary_goal = joined_goals.split(";")[-1].strip() if joined_goals else ""
+                    for name in gen:
+                        if not isinstance(name, str) or not name.strip():
+                            continue
+                        name = name.strip()
+                        # verify semantic relevance to the goal using similarity check
+                        try:
+                            sim = get_similarity_score(joined_goals or primary_goal, name)
+                        except Exception:
+                            sim = 0.0
+                        if sim < float(similarity_threshold):
+                            continue
+                        # try to resolve to TopicId in DB
+                        cur = conn.cursor()
+                        cur.execute("SELECT TopicId FROM Topics WHERE Name = ?", name)
+                        row = cur.fetchone()
+                        if row:
+                            tid = int(row[0])
+                            if tid in user_topic_ids:
+                                continue
+                            key = f"id:{tid}"
+                            if key not in candidates:
+                                candidates[key] = {"topic_id": tid, "name": name, "reasons": []}
+                                candidates[key]["reasons"].append({"type": "llm_suggest", "explanation": f"LLM suggested '{name}' (sim={sim})"})
+                        else:
+                            key = f"name:{name}"
+                            if key not in candidates:
+                                candidates[key] = {"topic_id": None, "name": name, "reasons": []}
+                                candidates[key]["reasons"].append({"type": "llm_suggest", "explanation": f"LLM suggested '{name}' (sim={sim})"})
+            except Exception:
+                # don't fail recommendation flow if LLM augmentation fails
                 pass
 
         # Score all candidates using SQL heuristic and optional qdrant blend
@@ -307,139 +378,344 @@ def get_weakness_topics(user_id: int, max_recs: int = 5) -> Dict[str, Any]:
             pass
 
 
-@tool
-def generate_roadmap_for_user(user_id: int, steps: int = 6, goal_text: Optional[str] = None) -> Dict[str, Any]:
-    """Generate a simple personalized learning roadmap for the user.
+GOAL_SIMILARITY_THRESHOLD = 0.55
 
-    Strategy:
-    - Start from user's weakest topics (lowest mastery) which is related to their interests.
-    - For each selected topic, include identified prerequisite topics (if any) as earlier steps when the user's mastery of them is low.
-    - Fill remaining steps with related high-relevance topics.
-    - when recommending new topics, consider semantic matches to user's goals (if provided) using Qdrant embeddings.
-    - If not enough related topics are found, fill remaining steps with global lowest-mastery topics not yet studied by the user.
-    - Each step includes a brief reason for its inclusion (e.g., "prerequisite for Topic X", "related to your interests", "aligned to goal: 'goal text'").
-    - when suggesting new topics, don't include topics the user has already studied (i.e., those present in UserTopicMastery).
-    Returns a list of ordered steps with brief reasons.
+
+def get_similarity_score(goal_text: str, topic_name: str) -> float:
+    """Estimate similarity between goal_text and topic_name."""
+    try:
+        if is_qdrant_available():
+            try:
+                results = search_similar_topics(goal_text, limit=50)
+            except Exception:
+                results = []
+            topic_lower = (topic_name or "").lower()
+            best = 0.0
+            for r in results:
+                name = (r.get("name") or "").lower()
+                score = float(r.get("score", 0.0) or 0.0)
+                if not name:
+                    continue
+                if name == topic_lower:
+                    return score
+                if topic_lower in name or name in topic_lower:
+                    best = max(best, score)
+            return round(best, 4)
+
+        if not goal_text or not topic_name:
+            return 1.0
+        return 1.0 if (topic_name.lower() in goal_text.lower() or goal_text.lower() in topic_name.lower()) else 0.0
+    except Exception:
+        return 0.0
+
+
+def is_goal_relevant(goal_text: str, topic_name: str) -> bool:
+    """Return True if topic_name is semantically close enough to goal_text."""
+    if not goal_text or not topic_name:
+        return True
+    return get_similarity_score(goal_text, topic_name) >= GOAL_SIMILARITY_THRESHOLD
+
+
+def generate_structured_curriculum_via_knowledge(goal_text: str) -> List[str]:
+    """Dynamically leverages the agent's generative internal knowledge 
+    to output an ideal, chronologically ordered curriculum array.
+    """
+    prompt = (
+        f"You are an expert curriculum design agent. The user's goal is: '{goal_text}'. "
+        f"Generate a chronologically ordered list of 6 to 8 core technical topics/milestones "
+        f"required to achieve this goal from scratch. "
+        f"Respond strictly with a valid JSON array of strings. Do not include Markdown wrapping, "
+        f"explanations, or numbering inside the strings. "
+        f"Example format: [\"Topic A\", \"Topic B\", \"Topic C\"]"
+    )
+    
+    try:
+        # Call the LLM (Groq) to generate a structured curriculum.
+        try:
+            llm = ChatGroq(
+                model="llama-3.3-70b-versatile",
+                api_key=SecretStr(os.getenv("GROQ_API_KEY") or ""),
+                temperature=0.0,
+            )
+            resp = llm.invoke([HumanMessage(content=prompt)])
+            raw_output = resp.content
+            if isinstance(raw_output, list):
+                raw_output = " ".join(str(r) for r in raw_output)
+
+            # Safely clean up any markdown/code fences
+            raw = str(raw_output).strip()
+            if raw.startswith("```json"):
+                raw = raw.split("```json", 1)[1].rsplit("```", 1)[0].strip()
+            elif raw.startswith("```"):
+                raw = raw.split("```", 1)[1].rsplit("```", 1)[0].strip()
+            # fallback: remove surrounding backticks if any
+            raw = raw.strip('`')
+
+            parsed_topics = json.loads(raw)
+            if isinstance(parsed_topics, list) and all(isinstance(item, str) for item in parsed_topics):
+                return parsed_topics
+        except Exception:
+            # swallow and let fallback run
+            pass
+
+    except Exception:
+        pass
+
+    # Algorithmic fallback framework if generative AI breaks entirely
+    clean_keyword = (
+        goal_text.replace("I want to be a", "")
+        .replace("I want to learn", "")
+        .replace("developer", "")
+        .strip()
+    )
+    return [
+        f"Foundations of {clean_keyword}",
+        f"Core Syntax & Architecture in {clean_keyword}",
+        f"Intermediate Methods of {clean_keyword}",
+        f"Working with Data Ecosystems in {clean_keyword}",
+        f"Advanced Design & Optimization for {clean_keyword}",
+        f"Real-world Project Implementation of {clean_keyword}"
+    ]
+
+
+@tool
+def generate_roadmap_for_user(
+    user_id: int,
+    steps: int = 6,
+    goal_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate a cohesive, complete personalized learning roadmap.
+    
+    This function compiles history matches, weak areas, and vector entries, 
+    then passes them to the agent logic to verify completeness, update context, 
+    and backfill structural core knowledge milestones in sequential order.
     """
     conn = get_conn()
     try:
-        user_topics = _fetch_user_topics(conn, user_id)
-        user_map = {t["topic_id"]: t for t in user_topics}
-        user_topic_ids = set(user_map.keys())
+        try:
+            user_topics = _fetch_user_topics(conn, user_id) or []
+        except Exception:
+            user_topics = []
+            
+        user_map = {t["topic_id"]: t for t in user_topics if "topic_id" in t}
+        
+        raw_candidates: List[Dict[str, Any]] = []
+        added_names: set = set()
+        message: Optional[str] = None
 
-        roadmap: List[Dict[str, Any]] = []
-        added: set = set()
+        # ── HELPERS ───────────────────────────────────────────────────────────
 
-        # 1) seed with weakest topics
-        weakest = sorted(user_topics, key=lambda x: x["mastery"])[: max(steps, 3)]
-        seeds = [t["topic_id"] for t in weakest]
+        def stage_candidate(tid: Optional[int], name: str, reason: str, metrics: Optional[dict] = None) -> bool:
+            if not name or name.lower() in added_names:
+                return False
+            
+            if metrics is None:
+                if tid:
+                    try:
+                        metrics = _fetch_topic_mastery(conn, tid, user_id)
+                    except Exception:
+                        metrics = {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}
+                else:
+                    metrics = {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}
+            # Remove redundant identity fields from metrics (they are stored outside metrics)
+            if isinstance(metrics, dict):
+                metrics.pop("topic_id", None)
+                metrics.pop("topicId", None)
+                metrics.pop("name", None)
+            # Store structured reasons for better provenance; keep legacy `reason` for compatibility
+            raw_candidates.append({
+                "topic_id": tid,
+                "name": name,
+                "reasons": [{"type": "initial", "explanation": reason}],
+                "reason": reason,
+                "metrics": metrics,
+            })
+            added_names.add(name.lower())
+            return True
 
-        # If a freeform goal_text is provided, expand seeds with Qdrant/semantic matches
+        # ── GOAL-DRIVEN DATA SCRAPING ─────────────────────────────────────────
         if goal_text:
-            try:
-                # search TopicEmbeddings first for canonical topics
-                q_topics = []
-                if is_qdrant_available():
-                    q_topics = search_similar_topics(goal_text, limit=20)
-
-                # include Qdrant topics into roadmap even if not in SQL
-                for qt in q_topics:
-                    tid = qt.get("topic_id")
-                    name = qt.get("name")
-                    # if qdrant returns a known topic_id and it's not already in user's map, consider it
-                    if tid and tid not in added and tid not in user_topic_ids:
-                        include_topic(tid, f"aligned to goal: '{goal_text}'")
-                    # if there's a name but no topic_id (or we want external topics), include by name
-                    if name and (not tid):
-                        # add a name-only entry (no SQL id)
-                        if name not in [r.get("name") for r in roadmap]:
-                            roadmap.append({"topic_id": None, "name": name, "reason": f"aligned to goal: '{goal_text}'", "metrics": {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}, "step": None})
-                            added.add(name)
-                # Also search resources semantically to discover additional topic names
-                if is_qdrant_available():
-                    res_hits = search_similar_resources(goal_text, limit=20)
-                    for r in res_hits:
-                        for tname in r.get("topics", []):
-                            if tname and tname not in [x.get("name") for x in roadmap]:
-                                roadmap.append({"topic_id": None, "name": tname, "reason": f"resource match for goal: '{goal_text}'", "metrics": {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}, "step": None})
-                                added.add(tname)
-            except Exception:
-                # ignore semantic failures and proceed with SQL-only roadmap
-                pass
-
-        def include_topic(tid: int, reason: str):
-            if tid in added:
-                return
-            # try to resolve name
-            name = user_map.get(tid, {}).get("name")
-            if not name:
-                cur = conn.cursor()
-                cur.execute("SELECT Name FROM Topics WHERE TopicId = ?", tid)
-                row = cur.fetchone()
-                name = row[0] if row else f"Topic {tid}"
-            metrics = _fetch_topic_mastery(conn, tid, user_id)
-            roadmap.append({"topic_id": tid, "name": name, "reason": reason, "metrics": metrics})
-            added.add(tid)
-
-        for sid in seeds:
-            # find prerequisites (Source -> Target where Target = sid and RelationshipType = 'prerequisite_for')
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT SourceTopicId FROM TopicRelationships WHERE TargetTopicId = ? AND RelationshipType = ?",
-                    sid,
-                    "prerequisite_for",
+            # 1. Harvest user history matching goal
+            # Include studied topics that are goal-relevant OR are weak for the user
+            relevant_studied = [
+                t for t in user_topics
+                if t.get("name") and (
+                    is_goal_relevant(goal_text, t["name"]) or t.get("mastery", 0.0) < 0.8
                 )
-                prereq_rows = cur.fetchall()
-                for pr in prereq_rows:
-                    pr_tid = int(pr[0])
-                    # include prerequisite earlier if user's mastery low
-                    pr_metrics = _fetch_topic_mastery(conn, pr_tid, user_id)
-                    if pr_metrics.get("mastery", 0.0) < 0.8:
-                        include_topic(pr_tid, f"prerequisite for '{sid}'")
-            except Exception:
-                pass
+            ]
 
-            include_topic(sid, "address weak mastery")
-            if len(roadmap) >= steps:
-                break
+            if relevant_studied:
+                weak_studied = [t for t in relevant_studied if t.get("mastery", 0.0) < 0.8]
+                weak_studied.sort(key=lambda x: x.get("mastery", 0.0))
 
-        # 2) fill remaining with high-relevance candidates from related topics
-        if len(roadmap) < steps:
-            related = _fetch_related_candidates(conn, list(user_topic_ids))
-            for r in related:
-                tid = r["topic_id"]
-                if tid in added or tid in user_topic_ids:
-                    continue
-                include_topic(tid, f"related to your topics: {r.get('name')}")
-                if len(roadmap) >= steps:
-                    break
+                for topic in weak_studied:
+                    sid = topic["topic_id"]
+                    seed_name = topic.get("name") or f"Topic {sid}"
+                    
+                    try:
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT SourceTopicId FROM TopicRelationships "
+                            "WHERE TargetTopicId = ? AND RelationshipType = ?",
+                            sid, "prerequisite_for",
+                        )
+                        for pr in cur.fetchall():
+                            pr_tid = int(pr[0])
+                            pr_name = user_map.get(pr_tid, {}).get("name")
+                            if not pr_name:
+                                cur2 = conn.cursor()
+                                cur2.execute("SELECT Name FROM Topics WHERE TopicId = ?", pr_tid)
+                                row = cur2.fetchone()
+                                pr_name = row[0] if row else f"Topic {pr_tid}"
+                            
+                            if is_goal_relevant(goal_text, pr_name):
+                                try:
+                                    pr_metrics = _fetch_topic_mastery(conn, pr_tid, user_id)
+                                except Exception:
+                                    pr_metrics = {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}
+                                    
+                                if pr_metrics.get("mastery", 0.0) < 0.8:
+                                    stage_candidate(pr_tid, pr_name, f"Prerequisite review for '{seed_name}'", pr_metrics)
+                    except Exception:
+                        pass
+                    
+                    stage_candidate(sid, seed_name, "Address historical mastery gap", topic)
 
-        # 3) final fill with global lowest-mastery topics not yet added
-        if len(roadmap) < steps:
+            # 2. Harvest Vector Database Entries (Qdrant)
+            if is_qdrant_available():
+                try:
+                    qdrant_results = search_similar_topics(goal_text, limit=30) or []
+                    # adaptive threshold relaxation to avoid over-filtering
+                    ordered = sorted(qdrant_results, key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+                    thresholds = []
+                    t = GOAL_SIMILARITY_THRESHOLD
+                    min_t = 0.45
+                    while t >= min_t:
+                        thresholds.append(round(t, 3))
+                        t -= 0.05
+
+                    for thr in thresholds:
+                        for qt in ordered:
+                            if len(raw_candidates) >= steps:
+                                break
+                            score = float(qt.get("score", 0.0) or 0.0)
+                            name = qt.get("name")
+                            tid = qt.get("topic_id")
+                            if not name:
+                                continue
+                            if score >= thr and name.lower() not in added_names:
+                                stage_candidate(int(tid) if tid else None, name, f"Discovered via semantic goal alignment (score={score})")
+                        if len(raw_candidates) >= steps:
+                            break
+                except Exception:
+                    pass
+
+            # 3. Harvest Base Database Fallbacks
             try:
                 cur = conn.cursor()
                 cur.execute(
-                    "SELECT t.TopicId, t.Name, ISNULL(utm.Mastery,0) AS Mastery FROM Topics t LEFT JOIN UserTopicMastery utm ON t.TopicId = utm.TopicId AND utm.UserId = ? ORDER BY Mastery ASC",
+                    "SELECT t.TopicId, t.Name FROM Topics t "
+                    "LEFT JOIN UserTopicMastery utm ON t.TopicId = utm.TopicId AND utm.UserId = ? "
+                    "WHERE utm.TopicId IS NULL",
                     user_id,
                 )
                 for r in cur.fetchall():
-                    tid = int(r[0])
-                    if tid in added or tid in user_topic_ids:
-                        continue
-                    include_topic(tid, "broaden learning path")
-                    if len(roadmap) >= steps:
-                        break
+                    if is_goal_relevant(goal_text, r[1]):
+                        stage_candidate(int(r[0]), r[1], "Database structural base topic")
             except Exception:
                 pass
 
-        # trim to requested steps
+            # ── AGENT INTEGRATION, SYNTHESIS, & COMPLETION ENGINE ─────────────────
+            # The agent builds the ideal logical blueprint from internal knowledge
+            ideal_sequence = generate_structured_curriculum_via_knowledge(goal_text)
+            
+            final_ordered_roadmap: List[Dict[str, Any]] = []
+            processed_candidate_names = {c["name"].lower(): c for c in raw_candidates}
+
+            # Loop through the ideal knowledge path to organize everything chronologically
+            for structural_topic in ideal_sequence:
+                # Rule A: If an item from our DB/Qdrant matches this step, inject it with its history/metrics intact!
+                matched_candidate = None
+                for candidate_name, candidate_data in processed_candidate_names.items():
+                    if (candidate_name in structural_topic.lower()) or (structural_topic.lower() in candidate_name):
+                        matched_candidate = candidate_data
+                        break
+                
+                if matched_candidate:
+                    # Update reason to specify it's verified and positioned logically
+                    orig_reasons = matched_candidate.get("reasons") or ([] if not matched_candidate.get("reason") else [{"type": "initial", "explanation": matched_candidate.get("reason")}])
+                    orig_expl = orig_reasons[0]["explanation"] if orig_reasons else matched_candidate.get("reason", "")
+                    validated = {"type": "validated", "explanation": f"Validated baseline step: {orig_expl}"}
+                    # ensure structured reasons list exists and append validation note
+                    matched_candidate.setdefault("reasons", orig_reasons)
+                    matched_candidate["reasons"].append(validated)
+                    # keep the legacy `reason` as the first explanation for compatibility
+                    matched_candidate["reason"] = matched_candidate["reasons"][0]["explanation"]
+                    final_ordered_roadmap.append(matched_candidate)
+                    # Remove from map so we don't duplicate it later
+                    processed_candidate_names.pop(matched_candidate["name"].lower(), None)
+                else:
+                    # Rule B: Agent generates a friendly, contextual backfill step to ensure completeness
+                    user_topic_names = [t.get("name") for t in user_topics if t.get("name")]
+                    context_snippet = ", ".join(user_topic_names[:3]) if user_topic_names else "your background"
+                    goal_label = goal_text or "your goal"
+                    friendly_expl = (
+                        f"Bridges {context_snippet} to '{goal_label}': recommended foundational step "
+                        f"to progress toward the goal."
+                    )
+                    final_ordered_roadmap.append({
+                        "topic_id": None,
+                        "name": structural_topic,
+                        "reasons": [{"type": "agent_backfill", "explanation": friendly_expl}],
+                        "reason": friendly_expl,
+                        "metrics": {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}
+                    })
+
+            # Append any leftover isolated DB/Qdrant matches that didn't blend into the template sequence
+            for leftover in processed_candidate_names.values():
+                final_ordered_roadmap.append(leftover)
+
+            roadmap = final_ordered_roadmap
+            message = f"Agent compiled a full blueprint for '{goal_text}'. Sorted existing matches and backfilled critical knowledge updates."
+
+        # ── INTEREST-BASED PATH (No goal_text provided) ───────────────────────
+        else:
+            message = "No learning goal specified. Pulling recommendations from general historical mastery gaps."
+            roadmap: List[Dict[str, Any]] = []
+            user_topics_sorted = sorted(user_topics, key=lambda x: x.get("mastery", 0.0))
+            weak_topics = [t for t in user_topics_sorted if t.get("mastery", 0.0) < 0.8]
+            
+            for topic in weak_topics:
+                if len(roadmap) >= steps:
+                    break
+                sid = topic.get("topic_id")
+                if not sid:
+                    continue
+                seed_name = topic.get("name") or f"Topic {sid}"
+                stage_candidate(sid, seed_name, "Address weak mastery", topic)
+            roadmap = raw_candidates
+
+        # ── FINALISE ORDER & STEPS ───────────────────────────────────────────
         roadmap = roadmap[:steps]
-        # add step numbers
         for i, step in enumerate(roadmap, start=1):
             step["step"] = i
 
-        return {"roadmap": roadmap}
+        # Normalize reasons: ensure only `reasons` (list of {type, explanation})
+        for step in roadmap:
+            # If structured reasons present, drop legacy `reason` string
+            if "reasons" in step:
+                # ensure it's a list of dicts
+                if not isinstance(step["reasons"], list):
+                    step["reasons"] = [{"type": "initial", "explanation": str(step["reasons"]) }]
+                # remove legacy field if present
+                if "reason" in step:
+                    step.pop("reason", None)
+            elif "reason" in step:
+                # convert legacy single reason into structured list
+                step["reasons"] = [{"type": "initial", "explanation": str(step.pop("reason"))}]
+
+        return {"roadmap": roadmap, "message": message}
+
     finally:
         try:
             conn.close()

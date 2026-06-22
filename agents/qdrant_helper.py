@@ -355,6 +355,55 @@ def get_chunks_for_session(session_id: int, limit: int = 200) -> list[dict]:
 
 TOPIC_COLLECTION = "TopicEmbeddings"
 
+# Collection name for ephemeral chat turns persisted after session completion
+CHAT_HISTORY_COLLECTION = "SessionChatHistory"
+
+
+def upsert_session_chat_history(
+    session_id: int,
+    user_id: int,
+    chat_turns: list[dict],
+    batch_size: int = 64,
+):
+    """
+    Persist ephemeral chat turns (role/text) into a dedicated Qdrant collection.
+
+    Each point payload contains: session_id, turn_index, role, text, user_id, created_at
+    Uses UUID point IDs to avoid collisions.
+    """
+    if not chat_turns:
+        return
+
+    client = _get_qdrant_client()
+    points = []
+    now = datetime.now(timezone.utc).isoformat()
+    import uuid
+
+    for i, t in enumerate(chat_turns, start=1):
+        text = t.get("text") or ""
+        role = t.get("role") or "user"
+        uid = int(t.get("user_id") or user_id)
+        vec = embed(text)
+        payload = {
+            "session_id": int(session_id),
+            "turn_index": int(i),
+            "role": role,
+            "text": text[:32000],
+            "user_id": uid,
+            "created_at": t.get("ts") or now,
+        }
+        points.append(PointStruct(id=str(uuid.uuid4()), vector=vec, payload=payload))
+
+        if len(points) >= batch_size:
+            client.upsert(collection_name=CHAT_HISTORY_COLLECTION, points=points)
+            points = []
+
+    if points:
+        client.upsert(collection_name=CHAT_HISTORY_COLLECTION, points=points)
+    logging.getLogger(__name__).info(
+        "SessionChatHistory upserted session_id=%s turns=%s", session_id, len(chat_turns)
+    )
+
 
 def upsert_topic(topic_id: int, name: str, domain_topic_id: Optional[int] = None, aliases: Optional[list] = None):
     """

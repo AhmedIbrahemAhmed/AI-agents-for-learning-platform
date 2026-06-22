@@ -174,6 +174,14 @@ curl -s -X POST http://localhost:8000/session/complete \
     "topic_results": [{"topic_name": "Supervised Learning", "quiz_score": 0.78, "study_completion": 0.9}],
     "content_chunks": ["chunk 1 text", "chunk 2 text"]
   }'
+
+Persistence note: Recent updates add an ephemeral in-memory session cache used to capture live chat turns during an active session. When `/session/complete` is called, the system will:
+
+- Persist any provided `content_chunks` into `SessionChunkEmbeddings` (as before).
+- Persist ephemeral cached chat turns (role + text) into a new Qdrant collection named `SessionChatHistory`.
+- Clear the in-memory cache for that `session_id` after persisting.
+
+This behavior means interactive assistant exchanges (user and assistant turns) are now preserved for later retrieval and semantic search. The Postman collection included in this repo contains an example flow `Assistant Session Query` -> `Session Complete (persist chat history)` that demonstrates this end-to-end flow.
 📊 4. Algorithmic Recommendations & Personalization Roadmaps
 Generates analytical performance-driven data selections targeting individual learning vectors.
 

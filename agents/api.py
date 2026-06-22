@@ -28,13 +28,19 @@ from qdrant_helper import (
     search_similar_topics,
     upsert_session,
     upsert_session_chunks,
+    upsert_session_chat_history,
 )
 from recommendation_agent import (
     generate_roadmap_for_user,
     get_weakness_topics,
     recommend_topics_for_user,
 )
-from session_chatbot import chat_session
+from session_chatbot import (
+    chat_session,
+    append_session_turn,
+    clear_session_cache,
+    get_session_cached_turns,
+)
 
 # Load environment variables safely
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -563,6 +569,23 @@ def session_complete(request: SessionCompleteRequest):
         except Exception as e:
             logger.warning("upsert_session_chunks failed: %s", e)
 
+    # Persist ephemeral in-memory chat turns (if any) into Qdrant `SessionChatHistory`.
+    try:
+        cached = get_session_cached_turns.invoke({"session_id": session_id, "max_items": None})
+        # tool returns a list of turn dicts; ensure it's a list
+        if isinstance(cached, list) and cached:
+            try:
+                upsert_session_chat_history(session_id=session_id, user_id=request.user_id, chat_turns=cached)
+            except Exception as e:
+                logger.warning("upsert_session_chat_history failed: %s", e)
+            try:
+                clear_session_cache.invoke({"session_id": session_id})
+            except Exception:
+                logger.debug("clear_session_cache failed for session %s", session_id)
+    except Exception:
+        # non-fatal: continue even if retrieving cached turns fails
+        logger.debug("get_session_cached_turns failed or returned no cached turns for session %s", session_id)
+
     return {"session_id": session_id, "topic_updates": topic_updates}
 
 
@@ -593,6 +616,20 @@ def assistant_query(request: AssistantRequest):
 
 @api.post("/assistant/session_query")
 def assistant_session_query(request: SessionChatRequest):
+    # store the incoming user turn in ephemeral cache (best-effort)
+    try:
+        append_session_turn.invoke(
+            {
+                "user_id": request.user_id,
+                "session_id": request.session_id,
+                "role": "user",
+                "text": request.query,
+            }
+        )
+    except Exception:
+        # non-fatal: continue even if caching fails
+        logger.debug("append_session_turn failed for session %s", request.session_id)
+
     result = chat_session.invoke(
         {
             "user_id": request.user_id,
@@ -603,6 +640,21 @@ def assistant_session_query(request: SessionChatRequest):
     )
     if isinstance(result, dict) and result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("error"))
+
+    # store assistant reply in ephemeral cache (best-effort)
+    try:
+        if isinstance(result, dict) and result.get("answer"):
+            append_session_turn.invoke(
+                {
+                    "user_id": request.user_id,
+                    "session_id": request.session_id,
+                    "role": "assistant",
+                    "text": result.get("answer"),
+                }
+            )
+    except Exception:
+        logger.debug("append_session_turn (assistant) failed for session %s", request.session_id)
+
     return result
 
 

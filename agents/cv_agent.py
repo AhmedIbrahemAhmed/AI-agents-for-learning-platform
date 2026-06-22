@@ -5,6 +5,9 @@ import sys
 from typing import List, Dict, Any, Tuple
 from contextlib import closing
 from database_tools import get_conn
+from pydantic import SecretStr
+from langchain_groq import ChatGroq
+from langchain_core.messages import HumanMessage
 
 def escape_latex(s: str) -> str:
     if not s:
@@ -185,6 +188,7 @@ def render_experiences_latex(exps: List[Dict[str, Any]]) -> str:
 
 def fetch_summary(user_id: int, max_skills: int = 3) -> str:
     candidate_fields = ["Summary", "Bio", "About", "ProfessionalSummary", "Description"]
+    # Prefer an explicit stored summary if present
     with closing(get_conn()) as conn, conn.cursor() as cur:
         for fld in candidate_fields:
             try:
@@ -195,8 +199,11 @@ def fetch_summary(user_id: int, max_skills: int = 3) -> str:
             except Exception:
                 continue
 
+    # Gather structured facts for prompt
     skills = fetch_skills_from_view(user_id, limit=max_skills)
     exps = fetch_experiences(user_id, limit=5)
+    projects = fetch_projects(user_id, limit=3)
+
     top_skills = ", ".join(s.get("name") for s in skills[:max_skills]) if skills else ""
     recent = None
     if exps:
@@ -207,6 +214,48 @@ def fetch_summary(user_id: int, max_skills: int = 3) -> str:
         if not recent:
             recent = exps[0]
 
+    # Build a concise prompt for a professional summary (2-3 sentences)
+    parts = []
+    if recent and (recent.get("role") or recent.get("company")):
+        rrole = recent.get("role") or ""
+        rcomp = recent.get("company") or ""
+        parts.append(f"{rrole} at {rcomp}".strip())
+    if top_skills:
+        parts.append(f"skilled in {top_skills}")
+
+    facts = []
+    if parts:
+        facts.append(" ".join(parts))
+    if projects:
+        proj_names = ", ".join(p.get("title") for p in projects if p.get("title"))
+        if proj_names:
+            facts.append(f"Notable projects: {proj_names}.")
+
+    fact_block = " ".join(facts)
+
+    prompt = (
+        "You are a professional resume writer. Using the facts below, write a concise professional summary (2-3 sentences) suitable for a CV. "
+        "Do not include headings or markdown. Keep it formal and focused on skills, recent role, and impact.\n\n"
+        f"Facts: {fact_block}\n\nIf there is little information, produce a short professional-sounding summary describing ambition and primary skills."
+    )
+
+    # Try generating via LLM (Groq) then fallback to heuristic
+    try:
+        llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=SecretStr(os.getenv("GROQ_API_KEY") or ""), temperature=0.1)
+        resp = llm.invoke([HumanMessage(content=prompt)])
+        out = resp.content
+        if isinstance(out, list):
+            out = " ".join(str(o) for o in out)
+        text = str(out).strip()
+        # strip code fences if any
+        if text.startswith("```"):
+            text = text.split("```", 2)[-1].strip('`').strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    # Algorithmic fallback
     parts = []
     if recent and (recent.get("role") or recent.get("company")):
         rrole = recent.get("role") or ""

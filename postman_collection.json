@@ -485,6 +485,56 @@
 			},
 			"response": []
 		}
+		,
+		{
+			"name": "Session Complete (persist chat history)",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"if(!pm.environment.get('session_id')){ throw new Error('session_id not set in environment. Run prepare with create_session=true first.'); }"
+						],
+						"type": "text/javascript"
+					}
+				},
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+							"var json = pm.response.json();",
+							"pm.test('Session persisted', function () { pm.expect(json).to.have.property('session_id'); pm.expect(json.topic_updates).to.be.an('array'); });"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"user_id\": 2,\n  \"session_id\": {{session_id}},\n  \"session_summary\": \"sample summary for chat history persist\",\n  \"topic_results\": [ { \"topic_name\": \"Neural Networks\", \"quiz_score\": 0.8, \"study_completion\": 0.9 } ],\n  \"content_chunks\": [\"chunk 1 text\", \"chunk 2 text\"]\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/session/complete",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"session",
+						"complete"
+					]
+				}
+			},
+			"response": []
+		}
 	],
 	"variable": [
 		{
