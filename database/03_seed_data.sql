@@ -156,7 +156,7 @@ VALUES
   (@Ahmed_UserId, 'Personal ML Portfolio', 'Implemented image classification models and deployed as REST API', 'https://github.com/ahmed/ml-portfolio', '2023-06-01', '2024-01-31', 'Lead Developer', 'PyTorch, FastAPI, Docker'),
   (@Ahmed_UserId, 'Decision Tree Visualizer', 'Web app for building and visualizing decision trees', 'https://github.com/ahmed/dt-visualizer', '2022-09-01', '2022-12-15', 'Full Stack Developer', 'React, Flask');
 
-INSERT INTO [dbo].[Certificates] (UserId, Name, Issuer, IssueDate, CredentialId, Url, Description)
+INSERT INTO [dbo].[Certificates] (UserId, Title, Issuer, IssueDate, CredentialId, Url, Description)
 VALUES
   (@Ahmed_UserId, 'Machine Learning Specialization', 'Coursera', '2023-02-15', 'MLSP-2023-0001', 'https://coursera.org/cert/MLSP-2023-0001', 'Completed a series of ML courses covering supervised and unsupervised learning'),
   (@Ahmed_UserId, 'Deep Learning Nanodegree', 'Udacity', '2024-03-10', 'DLND-2024-045', 'https://udacity.com/cert/DLND-2024-045', 'Projects in computer vision and sequence modeling');
