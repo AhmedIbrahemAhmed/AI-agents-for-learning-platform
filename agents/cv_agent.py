@@ -4,7 +4,15 @@ import re
 import sys
 from typing import List, Dict, Any, Tuple
 from contextlib import closing
-from database_tools import get_conn
+from database_tools import (
+    fetch_user_profile as db_fetch_user_profile,
+    fetch_skills_from_view as db_fetch_skills_from_view,
+    fetch_projects as db_fetch_projects,
+    fetch_certificates as db_fetch_certificates,
+    fetch_educations as db_fetch_educations,
+    fetch_experiences as db_fetch_experiences,
+    fetch_summary as db_fetch_summary,
+)
 from pydantic import SecretStr
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
@@ -25,93 +33,22 @@ def _format_date(d: Any) -> str:
     return d.strftime('%Y-%m') if hasattr(d, 'strftime') else (str(d) if d else '')
 
 def fetch_user_profile(user_id: int) -> Dict[str, str]:
-    with closing(get_conn()) as conn, conn.cursor() as cur:
-        cur.execute("SELECT Name, Email FROM Users WHERE UserId = ?", user_id)
-        row = cur.fetchone()
-        return {"name": row[0] or "", "email": row[1] or ""} if row else {"name": "", "email": ""}
+    return db_fetch_user_profile(user_id)
 
 def fetch_skills_from_view(user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
-    with closing(get_conn()) as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT SkillName, Proficiency, Confidence FROM dbo.UserSkillsView WHERE UserId = ? ORDER BY Proficiency DESC, EvidenceCount DESC",
-            user_id,
-        )
-        return [
-            {"name": r[0], "proficiency": float(r[1] or 0.0), "confidence": float(r[2] or 0.0)}
-            for r in cur.fetchall()[:limit]
-        ]
+    return db_fetch_skills_from_view(user_id, limit)
 
 def fetch_projects(user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
-    with closing(get_conn()) as conn, conn.cursor() as cur:
-        try:
-            cur.execute(
-                "SELECT Title, Description, Url, StartDate, EndDate, Role, Technologies FROM Projects WHERE UserId = ? ORDER BY COALESCE(StartDate, EndDate) DESC",
-                user_id,
-            )
-            return [
-                {"title": r[0] or "", "description": r[1] or "", "url": r[2] or "", "start_date": r[3], "end_date": r[4], "role": r[5] or "", "technologies": r[6] or ""}
-                for r in cur.fetchall()[:limit]
-            ]
-        except Exception:
-            cur.execute("SELECT Title FROM Projects WHERE UserId = ?", user_id)
-            return [{"title": r[0] or "", "description": "", "url": ""} for r in cur.fetchall()[:limit]]
+    return db_fetch_projects(user_id, limit)
 
 def fetch_certificates(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
-    with closing(get_conn()) as conn, conn.cursor() as cur:
-        try:
-            cur.execute("SELECT Name, Issuer, IssueDate, CredentialId, Url, Description FROM Certificates WHERE UserId = ? ORDER BY IssueDate DESC", user_id)
-            return [
-                {"name": r[0] or "", "issuer": r[1] or "", "issue_date": r[2], "credential_id": r[3] or "", "url": r[4] or "", "description": r[5] or ""}
-                for r in cur.fetchall()[:limit]
-            ]
-        except Exception:
-            return []
+    return db_fetch_certificates(user_id, limit)
 
 def fetch_educations(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
-    with closing(get_conn()) as conn, conn.cursor() as cur:
-        try:
-            cur.execute(
-                "SELECT Institution, Degree, Field, StartDate, EndDate, Location, Description, SortOrder FROM Educations WHERE UserId = ? ORDER BY COALESCE(SortOrder, 999)",
-                user_id,
-            )
-            return [
-                {
-                    "institution": r[0] or "",
-                    "degree": r[1] or "",
-                    "field": r[2] or "",
-                    "start_date": r[3],
-                    "end_date": r[4],
-                    "location": r[5] or "",
-                    "description": r[6] or "",
-                    "sort_order": r[7] if len(r) > 7 else None,
-                }
-                for r in cur.fetchall()[:limit]
-            ]
-        except Exception:
-            return []
+    return db_fetch_educations(user_id, limit)
 
 def fetch_experiences(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
-    with closing(get_conn()) as conn, conn.cursor() as cur:
-        try:
-            cur.execute(
-                "SELECT Company, Role, StartDate, EndDate, Location, Description, [Current], SortOrder FROM Experiences WHERE UserId = ? ORDER BY COALESCE(SortOrder, 999)",
-                user_id,
-            )
-            return [
-                {
-                    "company": r[0] or "",
-                    "role": r[1] or "",
-                    "start_date": r[2],
-                    "end_date": r[3],
-                    "location": r[4] or "",
-                    "description": r[5] or "",
-                    "current": bool(r[6]) if r[6] is not None else False,
-                    "sort_order": r[7] if len(r) > 7 else None,
-                }
-                for r in cur.fetchall()[:limit]
-            ]
-        except Exception:
-            return []
+    return db_fetch_experiences(user_id, limit)
 
 def render_skills_latex(skills: List[Dict[str, Any]]) -> str:
     if not skills:
@@ -187,17 +124,7 @@ def render_experiences_latex(exps: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 def fetch_summary(user_id: int, max_skills: int = 3) -> str:
-    candidate_fields = ["Summary", "Bio", "About", "ProfessionalSummary", "Description"]
-    # Prefer an explicit stored summary if present
-    with closing(get_conn()) as conn, conn.cursor() as cur:
-        for fld in candidate_fields:
-            try:
-                cur.execute(f"SELECT {fld} FROM Users WHERE UserId = ?", user_id)
-                row = cur.fetchone()
-                if row and row[0]:
-                    return str(row[0])
-            except Exception:
-                continue
+    return db_fetch_summary(user_id, max_skills)
 
     # Gather structured facts for prompt
     skills = fetch_skills_from_view(user_id, limit=max_skills)

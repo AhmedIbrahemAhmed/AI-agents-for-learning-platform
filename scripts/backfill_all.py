@@ -19,7 +19,15 @@ load_dotenv(os.path.join(ROOT, ".env"))
 sys.path.insert(0, os.path.join(ROOT))
 sys.path.insert(0, os.path.join(ROOT, "agents"))
 
-from agents.database_tools import get_conn
+from agents.database_tools import (
+    fetch_all_topics,
+    fetch_prerequisites_for_target,
+    fetch_all_resources,
+    fetch_resource_topics,
+    fetch_all_sessions,
+    get_resource_by_id,
+    get_conn,
+)
 from agents.qdrant_helper import (
     upsert_topic,
     upsert_resource,
@@ -32,19 +40,13 @@ from agents.content_loader import fetch_source_content
 
 
 def backfill_topics(conn):
-    cur = conn.cursor()
-    cur.execute("SELECT TopicId, Name FROM Topics")
     total = 0
-    for tid, name in cur.fetchall():
+    for t in fetch_all_topics():
+        tid = int(t.get("topic_id"))
+        name = t.get("name")
         try:
-            # find domain parent if any
-            cur2 = conn.cursor()
-            cur2.execute(
-                "SELECT SourceTopicId FROM TopicRelationships WHERE TargetTopicId = ? AND RelationshipType = 'contains'",
-                int(tid),
-            )
-            dom = cur2.fetchone()
-            dom_id = int(dom[0]) if dom else None
+            doms = fetch_prerequisites_for_target(tid, relationship_type="contains")
+            dom_id = int(doms[0]) if doms else None
             upsert_topic(int(tid), str(name), domain_topic_id=dom_id, aliases=[])
             total += 1
         except Exception as e:
@@ -53,44 +55,37 @@ def backfill_topics(conn):
 
 
 def backfill_resources(conn):
-    cur = conn.cursor()
-    cur.execute("SELECT ResourceId, Title, Difficulty, Url FROM Resources")
     total = 0
-    for rid, title, diff, url in cur.fetchall():
+    for r in fetch_all_resources():
         try:
-            tcur = conn.cursor()
-            tcur.execute("SELECT t.Name FROM ResourceTopics rt JOIN Topics t ON rt.TopicId = t.TopicId WHERE rt.ResourceId = ?", rid)
-            trows = tcur.fetchall()
-            topics = [r[0] for r in trows] or []
+            rid = int(r.get("resource_id"))
+            title = r.get("title")
+            diff = r.get("difficulty") or 2
+            url = r.get("url")
+            topics = fetch_resource_topics(rid) or []
             upsert_resource(int(rid), str(title or ""), topics, int(diff or 2), str(url or ""))
             total += 1
         except Exception as e:
-            print(f"Failed to upsert resource {rid}:", e)
+            print(f"Failed to upsert resource {r.get('resource_id')}:", e)
     print(f"Backfilled {total} resources")
 
 
 def backfill_sessions(conn, include_chunks: bool = False):
-    cur = conn.cursor()
-    cur.execute("SELECT SessionId, UserId, ResourceId, SessionSummary FROM StudySessions")
     total = 0
-    for sid, uid, rid, summary in cur.fetchall():
+    for s in fetch_all_sessions():
+        sid = int(s.get("session_id"))
+        uid = int(s.get("user_id"))
+        rid = s.get("resource_id")
+        summary = s.get("summary")
         try:
-            # gather topics from resource
-            tcur = conn.cursor()
-            tcur.execute("SELECT t.Name FROM ResourceTopics rt JOIN Topics t ON rt.TopicId = t.TopicId WHERE rt.ResourceId = ?", rid)
-            trows = tcur.fetchall()
-            topics = [r[0] for r in trows] or []
-
+            topics = fetch_resource_topics(rid) if rid else []
             upsert_session(int(sid), int(uid), topics, str(summary or ""), 0.0)
             total += 1
 
-            if include_chunks:
-                # attempt to fetch resource URL from Resources table
-                rcur = conn.cursor()
-                rcur.execute("SELECT Url, SourceType FROM Resources WHERE ResourceId = ?", rid)
-                row = rcur.fetchone()
-                url = row[0] if row else None
-                source_type = (row[1] if row and len(row) > 1 else None) or "youtube"
+            if include_chunks and rid:
+                res = get_resource_by_id(rid)
+                url = res.get("url") if res else None
+                source_type = (res.get("source_type") if res else None) or "youtube"
                 if url:
                     try:
                         result = fetch_source_content(source_type, url)

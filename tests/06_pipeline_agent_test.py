@@ -18,17 +18,14 @@ warnings.filterwarnings("ignore", message=".*unauthenticated requests to the HF 
 
 load_dotenv()
 
-# ── DB Connection ─────────────────────────────────────────────
-DB_CONN_STR = (
-    "DRIVER={ODBC Driver 17 for SQL Server};"
-    "SERVER=localhost\\SQLEXPRESS;"
-    "DATABASE=GraduationProject;"
-    "Trusted_Connection=yes;"
-    "UID=Ahmed;PWD=3092003sss;"
+# Use centralized DB helpers from agents/database_tools
+from database_tools import (
+    lookup_topic_by_name,
+    create_study_session as db_create_study_session_tool,
+    insert_evidence as db_insert_evidence,
+    run_full_pipeline as db_run_full_pipeline_tool,
+    fetch_user_mastery as db_fetch_user_mastery,
 )
-
-def get_conn():
-    return pyodbc.connect(DB_CONN_STR)
 
 
 # ── Tools ─────────────────────────────────────────────────────
@@ -36,33 +33,28 @@ def get_conn():
 @tool
 def get_topic_id(topic_name: str) -> dict:
     """Looks up TopicId and Type by name from the database. Use this separately for both topics and domains."""
-    conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT TopicId, Type FROM Topics WHERE Name = ?", topic_name)
-    row = cursor.fetchone()
-    conn.close()
-    if row:
-        return {"topic_id": int(row[0]), "type": row[1]}
-    return {"error": f"Topic '{topic_name}' not found"}
+    try:
+        r = lookup_topic_by_name(topic_name)
+        if r:
+            return r
+        return {"error": f"Topic '{topic_name}' not found"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @tool
 def create_study_session(user_id: int, resource_id: int, summary: str) -> dict:
     """Creates a StudySession row. Returns session_id."""
-    conn = get_conn()
-    cursor = conn.cursor()
-    
-    # Removed the 'Status' column and its corresponding '?' placeholder
-    cursor.execute("""
-        INSERT INTO StudySessions (UserId, ResourceId, StartedAt, EndedAt, SessionSummary)
-        OUTPUT INSERTED.SessionId
-        VALUES (?, ?, ?, ?, ?)
-    """, user_id, resource_id, datetime.utcnow(), datetime.utcnow(), summary)
-    
-    row = cursor.fetchone()
-    conn.commit()
-    conn.close()
-    return {"session_id": int(row[0])}
+    try:
+        # reuse centralized tool implementation
+        res = db_create_study_session_tool.invoke({
+            "user_id": user_id,
+            "resource_id": resource_id,
+            "summary": summary,
+        })
+        return {"session_id": res.get("session_id")}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 
@@ -79,15 +71,10 @@ def insert_evidence(session_id: int, topic_id: int, evidence_type: str, score: f
     if not (0.0 <= score <= 1.0):
         return {"error": f"Score {score} out of range [0.0, 1.0]"}
 
-    conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO Evidence (SessionId, TopicId, Type, Score)
-        VALUES (?, ?, ?, ?)
-    """, session_id, topic_id, evidence_type, round(score, 2))
-    conn.commit()
-    conn.close()
-    return {"status": "inserted", "type": evidence_type, "score": score}
+    try:
+        return db_insert_evidence(session_id, topic_id, evidence_type, score)
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @tool
@@ -103,99 +90,26 @@ def run_full_pipeline(
     Then pushes the final telemetry values out to Qdrant.
     Returns an absolute literal string representation of updated database records.
     """
-    conn = get_conn()
-    cursor = conn.cursor()
-    
     try:
-        # 1. Execute the full telemetric orchestration flow pipeline
-        cursor.execute(
-            "EXEC usp_ProcessSession ?, ?, ?, ?",
-            user_id, session_id, topic_id, domain_topic_id
-        )
-        conn.commit()
-
-        # 2. Fetch updated SQL State parameters for reporting
-        cursor.execute("""
-            SELECT Mastery, Confidence, EvidenceCount
-            FROM   UserTopicMastery
-            WHERE  UserId = ? AND TopicId = ?
-        """, user_id, topic_id)
-        row = cursor.fetchone()
-
-        cursor.execute("""
-            SELECT Score FROM UserDomains
-            WHERE UserId = ? AND TopicId = ?
-        """, user_id, domain_topic_id)
-        domain = cursor.fetchone()
-
-        # 3. Retrieve descriptive metadata safely
-        cursor.execute("""
-            SELECT SS.SessionSummary, T.Name
-            FROM   StudySessions SS
-            CROSS JOIN Topics    T
-            WHERE  T.TopicId = ? AND SS.SessionId = ?
-        """, topic_id, session_id)
-        meta = cursor.fetchone()
-        
-        # 4. Compute quiz metrics for Qdrant storage pipeline tracking
-        cursor.execute("""
-            SELECT ISNULL(AVG(Score), 0)
-            FROM   Evidence
-            WHERE  SessionId = ? AND TopicId = ? AND Type IN ('quiz', 'assessment')
-        """, session_id, topic_id)
-        quiz_score = float(cursor.fetchone()[0])
-
-    finally:
-        conn.close()
-
-    # Extract or establish fallback definitions
-    mastery_val   = float(row[0]) if row else 0.0
-    confidence_val = float(row[1]) if row else 0.0
-    evidence_count = int(row[2]) if row else 0
-    domain_score   = float(domain[0]) if domain else 0.0
-    topic_name     = meta[1] if meta else f"Topic {topic_id}"
-
-    # 5. Compile an explicit payload string that the LLM CANNOT misunderstand
-    result_payload = {
-        "status": "COMPLETED",
-        "topic_name": topic_name,
-        "mastery": mastery_val,
-        "confidence": confidence_val,
-        "evidence_count": evidence_count,
-        "domain_score": domain_score,
-        "quiz_score_used": quiz_score,
-        "qdrant_status": "Successfully synchronized session vector embedding"
-    }
-
-    # Returning a stringified JSON forces LangGraph to inject explicit text 
-    # directly into the LLM's next context window.
-    return json.dumps(result_payload)
+        payload = db_run_full_pipeline_tool.invoke({
+            "user_id": user_id,
+            "session_id": session_id,
+            "topic_id": topic_id,
+            "domain_topic_id": domain_topic_id,
+        })
+        # If the tool returns a JSON string (old behaviour), pass it through.
+        return payload
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 @tool
 def get_user_mastery(user_id: int) -> list:
     """Returns all current topic mastery records for a specific user ID profile."""
-    conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT T.Name, UTM.Mastery, UTM.Confidence, UTM.EvidenceCount, UTM.LastUpdated
-        FROM   UserTopicMastery UTM
-        JOIN   Topics           T ON T.TopicId = UTM.TopicId
-        WHERE  UTM.UserId = ?
-        ORDER  BY UTM.Mastery DESC
-    """, user_id)
-    rows = cursor.fetchall()
-    conn.close()
-    return [
-        {
-            "topic":          r[0],
-            "mastery":        float(r[1]),
-            "confidence":     float(r[2]),
-            "evidence_count": int(r[3]),
-            "last_updated":   str(r[4]),
-        }
-        for r in rows
-    ]
+    try:
+        return db_fetch_user_mastery(user_id)
+    except Exception:
+        return []
 
 
 # ── Agent Graph Loop Configurations ───────────────────────────

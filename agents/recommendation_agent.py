@@ -3,7 +3,17 @@ from typing import List, Dict, Any, Optional
 
 from langchain_core.tools import tool
 
-from database_tools import get_conn
+from database_tools import (
+    get_conn,
+    fetch_user_topics,
+    fetch_related_candidates,
+    fetch_topic_mastery,
+    fetch_user_goals,
+    lookup_topic_by_name,
+    fetch_topics_not_in,
+    get_topic_name_by_id,
+    fetch_topics_by_names,
+)
 from qdrant_helper import (
     search_similar_resources,
     search_user_sessions,
@@ -19,58 +29,15 @@ from langchain_core.messages import HumanMessage
 
 
 def _fetch_user_topics(conn, user_id: int) -> List[Dict[str, Any]]:
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT t.TopicId, t.Name, utm.Mastery, utm.Confidence, utm.Interest
-        FROM UserTopicMastery utm
-        JOIN Topics t ON utm.TopicId = t.TopicId
-        WHERE utm.UserId = ?
-        """,
-        user_id,
-    )
-    rows = cursor.fetchall()
-    return [
-        {
-            "topic_id": int(r[0]),
-            "name": r[1],
-            "mastery": float(r[2]) if r[2] is not None else 0.0,
-            "confidence": float(r[3]) if r[3] is not None else 0.0,
-            "interest": float(r[4]) if r[4] is not None else 0.5,
-        }
-        for r in rows
-    ]
+    return fetch_user_topics(user_id)
 
 
 def _fetch_related_candidates(conn, topic_ids: List[int]) -> List[Dict[str, Any]]:
-    if not topic_ids:
-        return []
-    qmarks = ",".join(["?" for _ in topic_ids])
-    sql = f"""
-        SELECT DISTINCT tr.SourceTopicId, tr.TargetTopicId, tr.RelationshipType, t.Name
-        FROM TopicRelationships tr
-        JOIN Topics t ON tr.TargetTopicId = t.TopicId
-        WHERE tr.SourceTopicId IN ({qmarks})
-        """
-    cursor = conn.cursor()
-    cursor.execute(sql, *topic_ids)
-    rows = cursor.fetchall()
-    return [
-        {"source_topic_id": int(r[0]), "topic_id": int(r[1]), "rel_type": r[2], "name": r[3]} for r in rows
-    ]
+    return fetch_related_candidates(topic_ids)
 
 
 def _fetch_topic_mastery(conn, topic_id: int, user_id: int):
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT Mastery, Confidence, Interest FROM UserTopicMastery WHERE UserId = ? AND TopicId = ?",
-        user_id,
-        topic_id,
-    )
-    row = cursor.fetchone()
-    if not row:
-        return {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}
-    return {"mastery": float(row[0]), "confidence": float(row[1]), "interest": float(row[2])}
+    return fetch_topic_mastery(user_id, topic_id)
 
 
 def _score_candidate(candidate, user_metrics, rel_type: str) -> float:
@@ -88,18 +55,7 @@ def _score_candidate(candidate, user_metrics, rel_type: str) -> float:
 
 
 def _fetch_user_goals(conn, user_id: int) -> List[str]:
-    cursor = conn.cursor()
-    cursor.execute("SELECT Title, Description FROM Goals WHERE UserId = ?", user_id)
-    rows = cursor.fetchall()
-    goals: List[str] = []
-    for r in rows:
-        title = (r[0] or "").strip()
-        desc = (r[1] or "").strip()
-        if title:
-            goals.append(title)
-        if desc:
-            goals.append(desc)
-    return goals
+    return fetch_user_goals(user_id)
 
 
 def _weakness_topics(conn, user_id: int, max_recs: int = 5) -> List[Dict[str, Any]]:
@@ -165,11 +121,9 @@ def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optio
 
                 for r in q_results:
                     for tname in r.get("topics", []):
-                        cur = conn.cursor()
-                        cur.execute("SELECT TopicId FROM Topics WHERE Name = ?", tname)
-                        row = cur.fetchone()
-                        if row:
-                            tid = int(row[0])
+                        lookup = lookup_topic_by_name(tname)
+                        if lookup and lookup.get("topic_id"):
+                            tid = int(lookup["topic_id"]) 
                             # skip topics user already has
                             if tid in user_topic_ids:
                                 continue
@@ -189,11 +143,9 @@ def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optio
 
                 for ch in chunk_hits:
                     for tname in ch.get("topics", []):
-                        cur = conn.cursor()
-                        cur.execute("SELECT TopicId FROM Topics WHERE Name = ?", tname)
-                        row = cur.fetchone()
-                        if row:
-                            tid = int(row[0])
+                        lookup = lookup_topic_by_name(tname)
+                        if lookup and lookup.get("topic_id"):
+                            tid = int(lookup["topic_id"]) 
                             if tid in user_topic_ids:
                                 continue
                             key = f"id:{tid}"
@@ -257,11 +209,9 @@ def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optio
                         if sim < float(similarity_threshold):
                             continue
                         # try to resolve to TopicId in DB
-                        cur = conn.cursor()
-                        cur.execute("SELECT TopicId FROM Topics WHERE Name = ?", name)
-                        row = cur.fetchone()
-                        if row:
-                            tid = int(row[0])
+                        lookup = lookup_topic_by_name(name)
+                        if lookup and lookup.get("topic_id"):
+                            tid = int(lookup["topic_id"])
                             if tid in user_topic_ids:
                                 continue
                             key = f"id:{tid}"
@@ -299,19 +249,14 @@ def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optio
         if not scored:
             # If no related or semantic candidates were found, expand search to global topics
             try:
-                cur = conn.cursor()
-                if user_topic_ids:
-                    qmarks = ",".join(["?" for _ in user_topic_ids])
-                    cur.execute(f"SELECT TopicId, Name FROM Topics WHERE TopicId NOT IN ({qmarks})", *user_topic_ids)
-                else:
-                    cur.execute("SELECT TopicId, Name FROM Topics")
-                rows = cur.fetchall()
+                rows = fetch_topics_not_in(user_topic_ids)
                 for r in rows:
-                    tid = int(r[0])
-                    tname = r[1]
-                    if tid in candidates:
+                    tid = int(r.get("topic_id"))
+                    tname = r.get("name")
+                    key = tid
+                    if str(key) in candidates or key in candidates:
                         continue
-                    candidates[tid] = {"topic_id": tid, "name": tname, "reasons": []}
+                    candidates[key] = {"topic_id": tid, "name": tname, "reasons": []}
                     # simple goal matching heuristic: if any goal text is contained in the topic name
                     goal_boost = 0.0
                     lname = (tname or "").lower()
@@ -319,14 +264,13 @@ def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optio
                         if not g:
                             continue
                         if g.lower() in lname or lname in g.lower():
-                            candidates[tid]["reasons"].append({"type": "goal_match", "explanation": f"Matches user goal: '{g}'"})
+                            candidates[key]["reasons"].append({"type": "goal_match", "explanation": f"Matches user goal: '{g}'"})
                             goal_boost = 1.0
                             break
-                    if not candidates[tid]["reasons"]:
-                        candidates[tid]["reasons"].append({"type": "new_topic", "explanation": "New topic not previously studied"})
-                    # store goal_boost as a simple signal
+                    if not candidates[key]["reasons"]:
+                        candidates[key]["reasons"].append({"type": "new_topic", "explanation": "New topic not previously studied"})
                     if goal_boost > 0:
-                        candidates[tid].setdefault("goal_boost", []).append(goal_boost)
+                        candidates[key].setdefault("goal_boost", []).append(goal_boost)
             except Exception:
                 # if anything fails, fallback to weaknesses
                 return {"recommendations": _weakness_topics(conn, user_id, max_recs)}
@@ -553,27 +497,18 @@ def generate_roadmap_for_user(
                     seed_name = topic.get("name") or f"Topic {sid}"
                     
                     try:
-                        cur = conn.cursor()
-                        cur.execute(
-                            "SELECT SourceTopicId FROM TopicRelationships "
-                            "WHERE TargetTopicId = ? AND RelationshipType = ?",
-                            sid, "prerequisite_for",
-                        )
-                        for pr in cur.fetchall():
-                            pr_tid = int(pr[0])
+                        prereqs = fetch_prerequisites_for_target(sid, "prerequisite_for")
+                        for pr_tid in prereqs:
                             pr_name = user_map.get(pr_tid, {}).get("name")
                             if not pr_name:
-                                cur2 = conn.cursor()
-                                cur2.execute("SELECT Name FROM Topics WHERE TopicId = ?", pr_tid)
-                                row = cur2.fetchone()
-                                pr_name = row[0] if row else f"Topic {pr_tid}"
-                            
+                                pr_name = get_topic_name_by_id(pr_tid) or f"Topic {pr_tid}"
+
                             if is_goal_relevant(goal_text, pr_name):
                                 try:
                                     pr_metrics = _fetch_topic_mastery(conn, pr_tid, user_id)
                                 except Exception:
                                     pr_metrics = {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}
-                                    
+
                                 if pr_metrics.get("mastery", 0.0) < 0.8:
                                     stage_candidate(pr_tid, pr_name, f"Prerequisite review for '{seed_name}'", pr_metrics)
                     except Exception:
@@ -612,16 +547,10 @@ def generate_roadmap_for_user(
 
             # 3. Harvest Base Database Fallbacks
             try:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT t.TopicId, t.Name FROM Topics t "
-                    "LEFT JOIN UserTopicMastery utm ON t.TopicId = utm.TopicId AND utm.UserId = ? "
-                    "WHERE utm.TopicId IS NULL",
-                    user_id,
-                )
-                for r in cur.fetchall():
-                    if is_goal_relevant(goal_text, r[1]):
-                        stage_candidate(int(r[0]), r[1], "Database structural base topic")
+                rows = fetch_unmastered_topics(user_id)
+                for r in rows:
+                    if is_goal_relevant(goal_text, r.get("name")):
+                        stage_candidate(int(r.get("topic_id")), r.get("name"), "Database structural base topic")
             except Exception:
                 pass
 

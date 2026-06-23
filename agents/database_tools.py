@@ -423,3 +423,505 @@ def run_full_pipeline(
         "domain_score": float(domain[0]) if domain else 0.0,
         "qdrant_status": "Successfully synchronized session vector embedding",
     })
+
+
+# ----------------------------------------
+# Convenience read-only helpers for other modules
+# These centralize small SELECTs used across agents and CLI scripts
+# ----------------------------------------
+
+
+def get_session_for_user_resource(user_id: int, resource_id: int) -> Optional[int]:
+    """Return existing SessionId for (user_id, resource_id) or None."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT SessionId FROM StudySessions WHERE UserId = ? AND ResourceId = ?",
+            user_id,
+            resource_id,
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else None
+    finally:
+        conn.close()
+
+
+def get_resource_id_for_session(session_id: int) -> Optional[int]:
+    """Return ResourceId for a given SessionId or None."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT ResourceId FROM StudySessions WHERE SessionId = ?", session_id)
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    finally:
+        conn.close()
+
+
+def get_resource_by_id(resource_id: int) -> Optional[Dict[str, Any]]:
+    """Return resource row as dict (Url, Type, Title, EstimatedMinutes) or None."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Url, Type, Title, EstimatedMinutes FROM Resources WHERE ResourceId = ?",
+            resource_id,
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "url": row[0],
+            "source_type": row[1],
+            "title": row[2],
+            "estimated_minutes": int(row[3]) if row[3] is not None else None,
+        }
+    finally:
+        conn.close()
+
+
+def fetch_user_profile(user_id: int) -> Dict[str, str]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT Name, Email FROM Users WHERE UserId = ?", user_id)
+        row = cur.fetchone()
+        return {"name": row[0] or "", "email": row[1] or ""} if row else {"name": "", "email": ""}
+    finally:
+        conn.close()
+
+
+def fetch_skills_from_view(user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT SkillName, Proficiency, Confidence FROM dbo.UserSkillsView WHERE UserId = ? ORDER BY Proficiency DESC, EvidenceCount DESC",
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {"name": r[0], "proficiency": float(r[1] or 0.0), "confidence": float(r[2] or 0.0)}
+            for r in rows[:limit]
+        ]
+    finally:
+        conn.close()
+
+
+def fetch_projects(user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Title, Description, Url, StartDate, EndDate, Role, Technologies FROM Projects WHERE UserId = ? ORDER BY COALESCE(StartDate, EndDate) DESC",
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {"title": r[0] or "", "description": r[1] or "", "url": r[2] or "", "start_date": r[3], "end_date": r[4], "role": r[5] or "", "technologies": r[6] or ""}
+            for r in rows[:limit]
+        ]
+    except Exception:
+        # fallback to simpler projection
+        cur = get_conn().cursor()
+        cur.execute("SELECT Title FROM Projects WHERE UserId = ?", user_id)
+        return [{"title": r[0] or "", "description": "", "url": ""} for r in cur.fetchall()[:limit]]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def fetch_certificates(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Title, Issuer, IssueDate, CredentialId, Url, Description FROM Certificates WHERE UserId = ? ORDER BY IssueDate DESC",
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {"name": r[0] or "", "issuer": r[1] or "", "issue_date": r[2], "credential_id": r[3] or "", "url": r[4] or "", "description": r[5] or ""}
+            for r in rows[:limit]
+        ]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def fetch_educations(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Institution, Degree, Field, StartDate, EndDate, Location, Description, SortOrder FROM Educations WHERE UserId = ? ORDER BY COALESCE(SortOrder, 999)",
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "institution": r[0] or "",
+                "degree": r[1] or "",
+                "field": r[2] or "",
+                "start_date": r[3],
+                "end_date": r[4],
+                "location": r[5] or "",
+                "description": r[6] or "",
+                "sort_order": r[7] if len(r) > 7 else None,
+            }
+            for r in rows[:limit]
+        ]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def fetch_experiences(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Company, Role, StartDate, EndDate, Location, Description, [Current], SortOrder FROM Experiences WHERE UserId = ? ORDER BY COALESCE(SortOrder, 999)",
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "company": r[0] or "",
+                "role": r[1] or "",
+                "start_date": r[2],
+                "end_date": r[3],
+                "location": r[4] or "",
+                "description": r[5] or "",
+                "current": bool(r[6]) if r[6] is not None else False,
+                "sort_order": r[7] if len(r) > 7 else None,
+            }
+            for r in rows[:limit]
+        ]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def fetch_summary(user_id: int, max_skills: int = 3) -> str:
+    candidate_fields = ["Summary", "Bio", "About", "ProfessionalSummary", "Description"]
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for fld in candidate_fields:
+            try:
+                cur.execute(f"SELECT {fld} FROM Users WHERE UserId = ?", user_id)
+                row = cur.fetchone()
+                if row and row[0]:
+                    return str(row[0])
+            except Exception:
+                continue
+    finally:
+        conn.close()
+
+    # Fall back to constructing a summary from other facts
+    skills = fetch_skills_from_view(user_id, limit=max_skills)
+    exps = fetch_experiences(user_id, limit=5)
+    projects = fetch_projects(user_id, limit=3)
+
+    top_skills = ", ".join(s.get("name") for s in skills[:max_skills]) if skills else ""
+    recent = None
+    if exps:
+        for e in exps:
+            if e.get("current"):
+                recent = e
+                break
+        if not recent:
+            recent = exps[0]
+
+    parts = []
+    if recent and (recent.get("role") or recent.get("company")):
+        rrole = recent.get("role") or ""
+        rcomp = recent.get("company") or ""
+        parts.append(f"{rrole} at {rcomp}".strip())
+    if top_skills:
+        parts.append(f"skilled in {top_skills}")
+
+    fact_block = " ".join(parts)
+    if parts:
+        return "Experienced " + ", ".join(parts) + "."
+    return ""
+
+
+def lookup_topic_by_name(topic_name: str) -> Optional[Dict[str, Any]]:
+    """Return TopicId and Type for a topic name, or None if not found."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT TopicId, Type FROM Topics WHERE Name = ?", topic_name)
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {"topic_id": int(row[0]), "type": row[1]}
+    finally:
+        conn.close()
+
+
+def insert_evidence(session_id: int, topic_id: int, evidence_type: str, score: float) -> Dict[str, Any]:
+    """Generic evidence insert wrapper used by tests and agents."""
+    allowed = {"study_time", "quiz", "assessment", "retention_test"}
+    if evidence_type not in allowed:
+        return {"error": f"Invalid type '{evidence_type}'. Allowed: {allowed}"}
+    if not (0.0 <= score <= 1.0):
+        return {"error": f"Score {score} out of range [0.0, 1.0]"}
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO Evidence (SessionId, TopicId, Type, Score) VALUES (?, ?, ?, ?)",
+            session_id,
+            topic_id,
+            evidence_type,
+            round(score, 2),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "inserted", "type": evidence_type, "score": score}
+
+
+def fetch_user_mastery(user_id: int) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+        SELECT T.Name, UTM.Mastery, UTM.Confidence, UTM.EvidenceCount, UTM.LastUpdated
+        FROM   UserTopicMastery UTM
+        JOIN   Topics           T ON T.TopicId = UTM.TopicId
+        WHERE  UTM.UserId = ?
+        ORDER  BY UTM.Mastery DESC
+        """,
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "topic": r[0],
+                "mastery": float(r[1]),
+                "confidence": float(r[2]),
+                "evidence_count": int(r[3]),
+                "last_updated": str(r[4]),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def fetch_user_topics(user_id: int) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+        SELECT t.TopicId, t.Name, utm.Mastery, utm.Confidence, utm.Interest
+        FROM UserTopicMastery utm
+        JOIN Topics t ON utm.TopicId = t.TopicId
+        WHERE utm.UserId = ?
+        """,
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "topic_id": int(r[0]),
+                "name": r[1],
+                "mastery": float(r[2]) if r[2] is not None else 0.0,
+                "confidence": float(r[3]) if r[3] is not None else 0.0,
+                "interest": float(r[4]) if r[4] is not None else 0.5,
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def fetch_related_candidates(topic_ids: List[int]) -> List[Dict[str, Any]]:
+    if not topic_ids:
+        return []
+    qmarks = ",".join(["?" for _ in topic_ids])
+    sql = f"""
+        SELECT DISTINCT tr.SourceTopicId, tr.TargetTopicId, tr.RelationshipType, t.Name
+        FROM TopicRelationships tr
+        JOIN Topics t ON tr.TargetTopicId = t.TopicId
+        WHERE tr.SourceTopicId IN ({qmarks})
+        """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, *topic_ids)
+        rows = cur.fetchall()
+        return [
+            {"source_topic_id": int(r[0]), "topic_id": int(r[1]), "rel_type": r[2], "name": r[3]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def fetch_topic_mastery(user_id: int, topic_id: int) -> Dict[str, Any]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Mastery, Confidence, Interest FROM UserTopicMastery WHERE UserId = ? AND TopicId = ?",
+            user_id,
+            topic_id,
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}
+        return {"mastery": float(row[0]), "confidence": float(row[1]), "interest": float(row[2])}
+    finally:
+        conn.close()
+
+
+def fetch_user_goals(user_id: int) -> List[str]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT Title, Description FROM Goals WHERE UserId = ?", user_id)
+        rows = cur.fetchall()
+        goals: List[str] = []
+        for r in rows:
+            title = (r[0] or "").strip()
+            desc = (r[1] or "").strip()
+            if title:
+                goals.append(title)
+            if desc:
+                goals.append(desc)
+        return goals
+    finally:
+        conn.close()
+
+
+def fetch_topics_by_names(names: List[str]) -> Dict[str, Optional[int]]:
+    out: Dict[str, Optional[int]] = {}
+    if not names:
+        return out
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        for n in names:
+            cur.execute("SELECT TopicId FROM Topics WHERE Name = ?", n)
+            row = cur.fetchone()
+            out[n] = int(row[0]) if row else None
+        return out
+    finally:
+        conn.close()
+
+
+def fetch_topics_not_in(user_topic_ids: List[int]) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        if user_topic_ids:
+            qmarks = ",".join(["?" for _ in user_topic_ids])
+            cur.execute(f"SELECT TopicId, Name FROM Topics WHERE TopicId NOT IN ({qmarks})", *user_topic_ids)
+        else:
+            cur.execute("SELECT TopicId, Name FROM Topics")
+        rows = cur.fetchall()
+        return [{"topic_id": int(r[0]), "name": r[1]} for r in rows]
+    finally:
+        conn.close()
+
+
+def get_topic_name_by_id(topic_id: int) -> Optional[str]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT Name FROM Topics WHERE TopicId = ?", topic_id)
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def fetch_prerequisites_for_target(target_id: int, relationship_type: str = "prerequisite_for") -> List[int]:
+    """Return SourceTopicId list for a given TargetTopicId and relationship type."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT SourceTopicId FROM TopicRelationships WHERE TargetTopicId = ? AND RelationshipType = ?",
+            target_id,
+            relationship_type,
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def fetch_unmastered_topics(user_id: int) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT t.TopicId, t.Name FROM Topics t LEFT JOIN UserTopicMastery utm ON t.TopicId = utm.TopicId AND utm.UserId = ? WHERE utm.TopicId IS NULL",
+            user_id,
+        )
+        return [{"topic_id": int(r[0]), "name": r[1]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def fetch_all_topics() -> List[Dict[str, Any]]:
+    return fetch_topics_not_in([])
+
+
+def fetch_all_resources() -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT ResourceId, Title, Difficulty, Url FROM Resources")
+        rows = cur.fetchall()
+        return [
+            {"resource_id": int(r[0]), "title": r[1], "difficulty": int(r[2]) if r[2] is not None else None, "url": r[3]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def fetch_resource_topics(resource_id: int) -> List[str]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        # Try current table name first
+        try:
+            cur.execute("SELECT t.Name FROM ResourceTopicCoverage rtc JOIN Topics t ON rtc.TopicId = t.TopicId WHERE rtc.ResourceId = ?", resource_id)
+            return [r[0] for r in cur.fetchall()]
+        except Exception:
+            # fallback for legacy schema name
+            cur = conn.cursor()
+            cur.execute("SELECT t.Name FROM ResourceTopics rt JOIN Topics t ON rt.TopicId = t.TopicId WHERE rt.ResourceId = ?", resource_id)
+            return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def fetch_all_sessions() -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT SessionId, UserId, ResourceId, SessionSummary FROM StudySessions")
+        rows = cur.fetchall()
+        return [
+            {"session_id": int(r[0]), "user_id": int(r[1]), "resource_id": int(r[2]) if r[2] is not None else None, "summary": r[3]}
+            for r in rows
+        ]
+    finally:
+        conn.close()

@@ -12,6 +12,9 @@ from database_tools import (
     get_or_create_topic,
     run_full_pipeline,
     save_quiz_results,
+    get_session_for_user_resource,
+    get_resource_id_for_session,
+    get_resource_by_id,
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -290,28 +293,16 @@ def content_prepare(request: ContentPrepareRequest):
         # Safely interact with Database Connection Pool
         try:
             if resource_id is not None:
-                conn = get_conn()
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT SessionId FROM StudySessions WHERE UserId = ? AND ResourceId = ?",
-                            request.user_id,
-                            resource_id,
-                        )
-                        row = cur.fetchone()
-                        if row:
-                            session_id = int(row[0])
-                        else:
-                            session_result = create_study_session.invoke(
-                                {
-                                    "user_id": request.user_id,
-                                    "resource_id": resource_id,
-                                    "summary": session_summary or "",
-                                }
-                            )
-                            session_id = session_result.get("session_id")
-                finally:
-                    conn.close()
+                session_id = get_session_for_user_resource(request.user_id, resource_id)
+                if not session_id:
+                    session_result = create_study_session.invoke(
+                        {
+                            "user_id": request.user_id,
+                            "resource_id": resource_id,
+                            "summary": session_summary or "",
+                        }
+                    )
+                    session_id = session_result.get("session_id")
             else:
                 session_id = None
                 session_error = (
@@ -430,28 +421,18 @@ def session_complete(request: SessionCompleteRequest):
 
     resource_id = request.resource_id
     if not resource_id:
-        conn = get_conn()
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT ResourceId FROM StudySessions WHERE SessionId = ?",
+            resource_id = get_resource_id_for_session(request.session_id)
+            if resource_id is None:
+                logger.warning(
+                    "session_complete: SessionId=%s has no ResourceId",
                     request.session_id,
                 )
-                row = cur.fetchone()
-                if row and row[0] is not None:
-                    resource_id = row[0]
-                else:
-                    logger.warning(
-                        "session_complete: SessionId=%s has no ResourceId",
-                        request.session_id,
-                    )
         except Exception:
             raise HTTPException(
                 status_code=500,
                 detail="Failed to resolve ResourceId from StudySessions",
             )
-        finally:
-            conn.close()
 
     session_id = request.session_id
     topic_updates: List[Dict[str, Any]] = []
@@ -526,21 +507,13 @@ def session_complete(request: SessionCompleteRequest):
     source_type = request.source_type or None
 
     if not resource_url and resource_id:
-        conn = get_conn()
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT Url, SourceType FROM Resources WHERE ResourceId = ?",
-                    resource_id,
-                )
-                row = cur.fetchone()
-                if row:
-                    resource_url = row[0]
-                    source_type = row[1] or source_type
+            res = get_resource_by_id(resource_id)
+            if res:
+                resource_url = res.get("url")
+                source_type = res.get("source_type") or source_type
         except Exception:
             pass
-        finally:
-            conn.close()
 
     chunks = request.content_chunks or []
     if not chunks and resource_url:
