@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from content_loader import fetch_source_content
@@ -96,6 +97,7 @@ class ContentPrepareResponse(BaseModel):
     session_id: Optional[int] = None
     session_summary: Optional[str] = None
     session_error: Optional[str] = None
+    started_at: Optional[datetime] = None
 
 
 class QuizGenerateRequest(BaseModel):
@@ -232,6 +234,7 @@ def content_prepare(request: ContentPrepareRequest):
     session_id = None
     session_summary = None
     session_error = None
+    started_at = None
 
     if request.user_id and request.create_session:
         try:
@@ -301,9 +304,13 @@ def content_prepare(request: ContentPrepareRequest):
                             "user_id": request.user_id,
                             "resource_id": resource_id,
                             "summary": session_summary or "",
+                            "duration_minutes": result.get("duration_minutes", 0.0),
                         }
                     )
+                    print("--- DEBUG SESSION RESULT ---", session_result)
                     session_id = session_result.get("session_id")
+                    started_at = session_result.get("started_at")
+                    print("--- DEBUG EXTRACTED STARTED_AT ---", started_at)
             else:
                 session_id = None
                 session_error = (
@@ -364,6 +371,7 @@ def content_prepare(request: ContentPrepareRequest):
         "session_id": session_id,
         "session_summary": session_summary,
         "session_error": session_error,
+        "started_at": started_at.isoformat() if isinstance(started_at, datetime) else started_at,
     }
 
 

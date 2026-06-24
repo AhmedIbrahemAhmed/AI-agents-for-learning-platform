@@ -1,7 +1,7 @@
 import json
 import os
 import pyodbc
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 
 from dotenv import load_dotenv
@@ -293,29 +293,33 @@ def create_topic_relationship(source_topic_id: int, target_topic_id: int, relati
 
 
 @tool
-def create_study_session(user_id: int, resource_id: Optional[int], summary: str) -> dict:
+def create_study_session(user_id: int, resource_id: Optional[int], summary: str, duration_minutes: float) -> dict:
     """Create a StudySessions row and return the session id."""
     conn = get_conn()
     cursor = conn.cursor()
     now_utc = datetime.now(timezone.utc)
+    ended_at_utc = now_utc + timedelta(minutes=duration_minutes)
 
     cursor.execute(
         """
         INSERT INTO StudySessions (UserId, ResourceId, StartedAt, EndedAt, SessionSummary)
-        OUTPUT INSERTED.SessionId
+        OUTPUT INSERTED.SessionId, INSERTED.StartedAt
         VALUES (?, ?, ?, ?, ?)
         """,
         user_id,
         resource_id,
         now_utc,
-        now_utc,
+        ended_at_utc,
         summary,
     )
 
     row = cursor.fetchone()
     conn.commit()
     conn.close()
-    return {"session_id": int(row[0])}
+    return {
+        "session_id": int(row[0]),
+        "started_at": row[1]
+    }
 
 
 @tool
