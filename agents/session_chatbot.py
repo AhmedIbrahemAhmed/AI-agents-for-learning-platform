@@ -110,7 +110,7 @@ Context (from study session {session_id}):
 
 User question: {query}
 
-Provide a concise, factual answer and cite the relevant chunk numbers where the information came from (e.g. [Chunk 1]). Do not hallucinate.
+Provide a concise, factual answer Do not hallucinate.
 """
 
     api_key = os.getenv("GROQ_API_KEY")

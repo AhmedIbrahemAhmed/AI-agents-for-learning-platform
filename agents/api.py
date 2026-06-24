@@ -292,9 +292,10 @@ def content_prepare(request: ContentPrepareRequest):
 
         # Safely interact with Database Connection Pool
         try:
+            # change this part to always create a session if resource_id is available, otherwise set session_id to None
             if resource_id is not None:
-                session_id = get_session_for_user_resource(request.user_id, resource_id)
-                if not session_id:
+                # session_id = get_session_for_user_resource(request.user_id, resource_id)
+                # if not session_id:
                     session_result = create_study_session.invoke(
                         {
                             "user_id": request.user_id,
