@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from fastapi.middleware.cors import CORSMiddleware
 
 from content_loader import fetch_source_content
 from cv_agent import generate_cv_latex
@@ -61,7 +62,13 @@ load_dotenv(DOTENV_PATH)
 
 logger = logging.getLogger(__name__)
 api = FastAPI(title="Quiz Agent API")
-
+api.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:4200","https://localhost:7132"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Backwards-compatible alias
 recommend_next_topics = recommend_topics_for_user
 
