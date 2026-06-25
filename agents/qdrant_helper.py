@@ -110,7 +110,7 @@ def upsert_resource(
 
 def upsert_session(
     session_id: int,
-    user_id: int,
+    user_id: str,
     topics: list[str],
     session_summary: str,
     quiz_score: float,
@@ -131,7 +131,7 @@ def upsert_session(
             vector=vector,
             payload={
                 "session_id": int(session_id),
-                "user_id":    int(user_id),
+                "user_id":    str(user_id),
                 "topics":     topics,
                 "quiz_score": quiz_score,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -179,7 +179,7 @@ def search_similar_resources(
 
 
 def search_user_sessions(
-    user_id: int,
+    user_id: str,
     query: str,
     limit: int = 5,
 ) -> list[dict]:
@@ -193,7 +193,7 @@ def search_user_sessions(
         collection_name="SessionEmbeddings",
         query_vector=vector,
         query_filter=Filter(
-            must=[FieldCondition(key="user_id", match=MatchValue(value=int(user_id)))]
+            must=[FieldCondition(key="user_id", match=MatchValue(value=str(user_id)))]
         ),
         limit=limit,
     )
@@ -211,7 +211,7 @@ def search_user_sessions(
 
 def upsert_session_chunks(
     session_id: int,
-    user_id: int,
+    user_id: str,
     content_chunks: list[str],
     topics: Optional[list[str]] = None,
     batch_size: int = 64,
@@ -228,7 +228,7 @@ def upsert_session_chunks(
         payload = {
             "session_id": int(session_id),
             "chunk_index": int(i),
-            "user_id": int(user_id),
+            "user_id": str(user_id),
             "topics": topics or [],
             "text": chunk[:32000],
             "created_at": now,
@@ -249,7 +249,7 @@ def upsert_session_chunks(
     logging.getLogger(__name__).info("SessionChunkEmbeddings upserted session_id=%s chunks=%s", session_id, len(content_chunks))
 
 
-def search_session_chunks(user_id: int, query: str, limit: int = 5) -> list[dict]:
+def search_session_chunks(user_id: str, query: str, limit: int = 5) -> list[dict]:
     """
     Semantic search over `SessionChunkEmbeddings` scoped to a user.
     Returns chunk payloads including `text`, `session_id`, `chunk_index`, `topics`, and score.
@@ -260,7 +260,7 @@ def search_session_chunks(user_id: int, query: str, limit: int = 5) -> list[dict
         collection_name="SessionChunkEmbeddings",
         query_vector=vector,
         query_filter=Filter(
-            must=[FieldCondition(key="user_id", match=MatchValue(value=int(user_id)))]
+            must=[FieldCondition(key="user_id", match=MatchValue(value=str(user_id)))]
         ),
         limit=limit,
     )
@@ -361,7 +361,7 @@ CHAT_HISTORY_COLLECTION = "SessionChatHistory"
 
 def upsert_session_chat_history(
     session_id: int,
-    user_id: int,
+    user_id: str,
     chat_turns: list[dict],
     batch_size: int = 64,
 ):
@@ -382,7 +382,7 @@ def upsert_session_chat_history(
     for i, t in enumerate(chat_turns, start=1):
         text = t.get("text") or ""
         role = t.get("role") or "user"
-        uid = int(t.get("user_id") or user_id)
+        uid = str(t.get("user_id") or user_id)
         vec = embed(text)
         payload = {
             "session_id": int(session_id),

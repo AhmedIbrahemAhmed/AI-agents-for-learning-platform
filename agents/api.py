@@ -8,7 +8,6 @@ from content_loader import fetch_source_content
 from cv_agent import generate_cv_latex
 from database_tools import (
     create_study_session,
-    get_conn,
     get_or_create_resource,
     get_or_create_topic,
     run_full_pipeline,
@@ -51,6 +50,15 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 DOTENV_PATH = os.path.join(ROOT, ".env")
 load_dotenv(DOTENV_PATH)
 
+# --- Schema Notes (merged StuckIn database) ---
+# user_id is now str (nvarchar GUID from AspNetUsers.Id), not int
+# Table renames: UserTopicMastery → UserTopicMasteries
+#                ResourceTopicCoverage → ResourceTopicCoverages
+# New columns: TopicRelationships.Weight, Evidence.CreatedAt,
+#              Goals.Priority, Goals.Category
+# ResourceId and SessionId are now bigint (Python int handles this fine)
+# StudySessions.SessionSummary is NOT NULL (always provide a value)
+
 logger = logging.getLogger(__name__)
 api = FastAPI(title="Quiz Agent API")
 
@@ -80,7 +88,7 @@ def get_canonical_topic_name(topic_name: str) -> str:
 class ContentPrepareRequest(BaseModel):
     source_type: str = "youtube"
     url: str
-    user_id: Optional[int] = None
+    user_id: Optional[str] = None  # AspNetUsers.Id (string GUID)
     create_session: Optional[bool] = False
 
 
@@ -125,7 +133,7 @@ class SessionTopicResult(BaseModel):
 
 
 class SessionCompleteRequest(BaseModel):
-    user_id: int
+    user_id: str  # AspNetUsers.Id (string GUID)
     session_id: Optional[int] = None
     resource_id: Optional[int] = None
     resource_url: Optional[str] = None
@@ -144,7 +152,7 @@ class SessionCompleteResponse(BaseModel):
 
 
 class RecommendRequest(BaseModel):
-    user_id: int
+    user_id: str  # AspNetUsers.Id (string GUID)
     max_recs: int = 5
     goals: Optional[List[str]] = None
 
@@ -162,20 +170,20 @@ class RecommendResponse(BaseModel):
 
 
 class AssistantRequest(BaseModel):
-    user_id: int
+    user_id: str  # AspNetUsers.Id (string GUID)
     query: str
     max_recs: int = 5
 
 
 class SessionChatRequest(BaseModel):
-    user_id: int
+    user_id: str  # AspNetUsers.Id (string GUID)
     session_id: int
     query: str
     max_chunks: int = 8
 
 
 class RoadmapRequest(BaseModel):
-    user_id: int
+    user_id: str  # AspNetUsers.Id (string GUID)
     steps: int = 6
     goal_text: Optional[str] = None
 
@@ -185,7 +193,7 @@ class DebugSessionChunksRequest(BaseModel):
 
 
 class CVGenerateRequest(BaseModel):
-    user_id: int
+    user_id: str  # AspNetUsers.Id (string GUID)
     template_name: Optional[str] = "simple_cv"
 
 
@@ -295,22 +303,19 @@ def content_prepare(request: ContentPrepareRequest):
 
         # Safely interact with Database Connection Pool
         try:
-            # change this part to always create a session if resource_id is available, otherwise set session_id to None
+            # Always create a session if resource_id is available
             if resource_id is not None:
-                # session_id = get_session_for_user_resource(request.user_id, resource_id)
-                # if not session_id:
-                    session_result = create_study_session.invoke(
-                        {
-                            "user_id": request.user_id,
-                            "resource_id": resource_id,
-                            "summary": session_summary or "",
-                            "duration_minutes": result.get("duration_minutes", 0.0),
-                        }
-                    )
-                    print("--- DEBUG SESSION RESULT ---", session_result)
-                    session_id = session_result.get("session_id")
-                    started_at = session_result.get("started_at")
-                    print("--- DEBUG EXTRACTED STARTED_AT ---", started_at)
+                session_result = create_study_session.invoke(
+                    {
+                        "user_id": request.user_id,
+                        "resource_id": resource_id,
+                        # SessionSummary is NOT NULL in schema — always provide a non-empty string
+                        "summary": session_summary or result.get("title", "Study session"),
+                        "duration_minutes": result.get("duration_minutes", 0.0),
+                    }
+                )
+                session_id = session_result.get("session_id")
+                started_at = session_result.get("started_at")
             else:
                 session_id = None
                 session_error = (
@@ -377,7 +382,7 @@ def content_prepare(request: ContentPrepareRequest):
 
 class PdfPrepareRequest(BaseModel):
     url: str
-    user_id: Optional[int] = None
+    user_id: Optional[str] = None  # AspNetUsers.Id (string GUID)
     create_session: Optional[bool] = False
 
 
@@ -649,7 +654,6 @@ def recommend_roadmap(request: RoadmapRequest):
     return {"roadmap": result.get("roadmap", [])}
 
 
-# Changed from async def to standard def since internal call blocks synchronous execution
 @api.post("/debug/session_chunks")
 def debug_session_chunks(req: DebugSessionChunksRequest):
     if not is_qdrant_available():

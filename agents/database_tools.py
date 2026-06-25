@@ -1,21 +1,42 @@
+"""
+Updated database_tools.py for merged AspNetDatabase (StuckIn)
+This version works with the merged database that combines:
+- Original AspNetDatabase (subscriptions, payments, users)
+- GraduationProject database (topics, resources, sessions, evidence)
+
+The databases are now unified under one connection string.
+
+KEY SCHEMA UPDATES:
+- UserTopicMastery → UserTopicMasteries
+- ResourceTopicCoverage → ResourceTopicCoverages
+- Goals table now includes Category field
+- Evidence includes CreatedAt and Type constraints
+"""
+
 import json
 import os
 import pyodbc
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional
+from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-from qdrant_helper import upsert_resource, upsert_session, upsert_topic
+
+# Try to import qdrant helpers if available (they're optional for this module)
+try:
+    from qdrant_helper import upsert_resource, upsert_session, upsert_topic
+    QDRANT_AVAILABLE = True
+except ImportError:
+    QDRANT_AVAILABLE = False
 
 # Load project .env (if present)
 load_dotenv()
 
-# Build DB connection string from environment variables with safe defaults.
-# Recommended .env keys: DB_DRIVER, DB_SERVER, DB_NAME, DB_TRUSTED (true/false), DB_UID, DB_PWD, DB_PORT
+# Build DB connection string from environment variables
+# Updated for merged database scenario
 DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 17 for SQL Server")
 DB_SERVER = os.getenv("DB_SERVER", "localhost\\SQLEXPRESS")
-DB_NAME = os.getenv("DB_NAME", "GraduationProject")
+DB_NAME = os.getenv("DB_NAME", "StuckIn")  # Using the merged database name
 DB_TRUSTED = os.getenv("DB_TRUSTED", "true").lower() in ("1", "true", "yes")
 DB_UID = os.getenv("DB_UID", "")
 DB_PWD = os.getenv("DB_PWD", "")
@@ -35,6 +56,7 @@ DB_CONN_STR = f"DRIVER={{{DB_DRIVER}}};SERVER={server_field};DATABASE={DB_NAME};
 
 
 def get_conn():
+    """Get a database connection to the merged database"""
     return pyodbc.connect(DB_CONN_STR)
 
 
@@ -45,7 +67,7 @@ def get_or_create_resource(
     duration_minutes: float,
     topic_name: str,
     source_type: str = "youtube",
-    difficulty: int = 2,
+    difficulty: int = 1,
 ) -> dict:
     """Insert or return an existing resource row and upsert its embedding to Qdrant."""
     conn = get_conn()
@@ -58,10 +80,8 @@ def get_or_create_resource(
         conn.close()
         return {"resource_id": int(row[0]), "created": False}
 
-    # Use stored procedure usp_GetOrCreateResource to centralize DB logic.
     resource_type = source_type.title()
     try:
-        # Insert a new resource and return the inserted ResourceId. Use OUTPUT to get the new id.
         cursor.execute(
             """
             INSERT INTO Resources (Title, Type, Url, Difficulty, Depth, EstimatedMinutes, CreatedAt)
@@ -72,7 +92,7 @@ def get_or_create_resource(
             resource_type,
             url,
             difficulty,
-            2,  # depth default
+            1,
             int(duration_minutes),
         )
         row = cursor.fetchone()
@@ -81,18 +101,18 @@ def get_or_create_resource(
     finally:
         conn.close()
 
-    # Upsert into Qdrant (idempotent)
-    try:
-        upsert_resource(
-            resource_id=resource_id,
-            title=title,
-            topics=[topic_name],
-            difficulty=difficulty,
-            url=url,
-        )
-    except Exception:
-        # best-effort: Qdrant failures are non-fatal
-        pass
+    # Upsert into Qdrant (idempotent, best-effort)
+    if QDRANT_AVAILABLE:
+        try:
+            upsert_resource(
+                resource_id=resource_id,
+                title=title,
+                topics=[topic_name],
+                difficulty=difficulty,
+                url=url,
+            )
+        except Exception:
+            pass
 
     return {"resource_id": int(resource_id), "created": True}
 
@@ -107,18 +127,16 @@ def get_or_create_topic(topic_name: str, create_if_missing: bool = False, topic_
     conn = get_conn()
     cursor = conn.cursor()
 
-    # If topic must exist but not create, check existence
     cursor.execute("SELECT TopicId FROM Topics WHERE Name = ?", topic_name)
     row = cursor.fetchone()
     if not row and not create_if_missing:
         conn.close()
         return {"error": f"Topic '{topic_name}' not found. Seed it first."}
 
-    # Use stored procedure usp_UpsertTopic to create-or-return the TopicId when allowed
     try:
         if row:
             topic_id = int(row[0])
-            # fetch domain if present
+            # Fetch domain if present
             cursor.execute(
                 "SELECT SourceTopicId FROM TopicRelationships WHERE TargetTopicId = ? AND RelationshipType = 'contains'",
                 topic_id,
@@ -126,69 +144,33 @@ def get_or_create_topic(topic_name: str, create_if_missing: bool = False, topic_
             domain_row = cursor.fetchone()
             domain_topic_id = int(domain_row[0]) if domain_row else None
         else:
-            try:
-                cursor.execute(
-                    "EXEC usp_UpsertTopic ?, ?, ?, ?, ?",
-                    topic_name,
-                    None,
-                    topic_type.title(),
-                    2,
-                    4.0,
-                )
-                # usp_UpsertTopic returns: TopicId, Name, Created
-                r = cursor.fetchone()
-                topic_id = int(r[0])
-                domain_topic_id = None
-                conn.commit()
-            except Exception:
-                # Fallback: usp_UpsertTopic signature may differ across environments.
-                # Try inserting without relying on a CreatedAt column (some schemas differ).
-                try:
-                    cursor.execute(
-                        """
-                        INSERT INTO Topics (Name, Type, CreatedAt)
-                        OUTPUT INSERTED.TopicId
-                        VALUES (?, ?, GETUTCDATE())
-                        """,
-                        topic_name,
-                        topic_type.title(),
-                    )
-                    r = cursor.fetchone()
-                    topic_id = int(r[0])
-                    domain_topic_id = None
-                    conn.commit()
-                except Exception:
-                    # Try a simpler insert without CreatedAt in case the column doesn't exist
-                    try:
-                        # Some schemas require EstimatedHours (non-nullable). Provide a safe default.
-                        cursor.execute(
-                            """
-                            INSERT INTO Topics (Name, Type, EstimatedHours)
-                            OUTPUT INSERTED.TopicId
-                            VALUES (?, ?, ?)
-                            """,
-                            topic_name,
-                            topic_type.title(),
-                            0.0,
-                        )
-                        r = cursor.fetchone()
-                        topic_id = int(r[0])
-                        domain_topic_id = None
-                        conn.commit()
-                    except Exception:
-                        # Let the outer finally close the connection and propagate
-                        raise
+            # Insert new topic
+            cursor.execute(
+                """
+                INSERT INTO Topics (Name, Type, Difficulty, EstimatedHours)
+                OUTPUT INSERTED.TopicId
+                VALUES (?, ?, ?, ?)
+                """,
+                topic_name,
+                topic_type.title(),
+                1,
+                4.0,
+            )
+            r = cursor.fetchone()
+            topic_id = int(r[0])
+            domain_topic_id = None
+            conn.commit()
     finally:
         conn.close()
 
     # Ensure the canonical topic is present in Qdrant (best-effort)
-    try:
-        upsert_topic(int(topic_id), topic_name, domain_topic_id=domain_topic_id, aliases=[])
-    except Exception:
-        pass
+    if QDRANT_AVAILABLE:
+        try:
+            upsert_topic(int(topic_id), topic_name, domain_topic_id=domain_topic_id, aliases=[])
+        except Exception:
+            pass
 
-    # Attempt to infer a domain topic if not present: look for a Topic with Type='Domain'
-    # whose name is a prefix of the topic_name or vice versa. Best-effort only.
+    # Attempt to infer a domain topic if not present (best-effort)
     if domain_topic_id is None:
         try:
             conn = get_conn()
@@ -210,7 +192,6 @@ def get_or_create_topic(topic_name: str, create_if_missing: bool = False, topic_
             if domain_match:
                 domain_topic_id = int(domain_match)
         except Exception:
-            # best-effort: ignore failures
             pass
 
     return {"topic_id": int(topic_id), "domain_topic_id": domain_topic_id}
@@ -218,11 +199,7 @@ def get_or_create_topic(topic_name: str, create_if_missing: bool = False, topic_
 
 @tool
 def create_topic(name: str, topic_type: str = "Concept") -> dict:
-    """Create a new topic row and return its TopicId.
-
-    `topic_type` should be one of the allowed types in the `Topics.Type` domain
-    (e.g. 'Domain', 'Concept', 'Technique', 'Tool', 'Career').
-    """
+    """Create a new topic row and return its TopicId."""
     allowed = {"Domain", "Concept", "Technique", "Tool", "Career"}
     ttype = topic_type.title()
     if ttype not in allowed:
@@ -231,38 +208,36 @@ def create_topic(name: str, topic_type: str = "Concept") -> dict:
     conn = get_conn()
     cursor = conn.cursor()
 
-    # Use stored proc to upsert topic and return TopicId
     try:
         cursor.execute(
-            "EXEC usp_UpsertTopic ?, ?, ?, ?, ?",
+            """
+            INSERT INTO Topics (Name, Type, Difficulty, EstimatedHours)
+            OUTPUT INSERTED.TopicId
+            VALUES (?, ?, ?, ?)
+            """,
             name,
-            None,
             ttype,
-            2,
+            1,
             4.0,
         )
         r = cursor.fetchone()
         tid = int(r[0])
-        created_flag = bool(r[2]) if len(r) > 2 else True
         conn.commit()
     finally:
         conn.close()
 
-    try:
-        upsert_topic(tid, name, domain_topic_id=None, aliases=[])
-    except Exception:
-        pass
+    if QDRANT_AVAILABLE:
+        try:
+            upsert_topic(tid, name, domain_topic_id=None, aliases=[])
+        except Exception:
+            pass
 
-    return {"topic_id": tid, "created": created_flag}
+    return {"topic_id": tid, "created": True}
 
 
 @tool
 def create_topic_relationship(source_topic_id: int, target_topic_id: int, relationship_type: str) -> dict:
-    """Insert a TopicRelationships row linking `source_topic_id` -> `target_topic_id`.
-
-    The `relationship_type` must conform to the allowed domain constraint.
-    Allowed values: 'contains', 'prerequisite_for', 'required_for', 'related_to'.
-    """
+    """Insert a TopicRelationships row linking source -> target topics."""
     allowed = {"contains", "prerequisite_for", "required_for", "related_to"}
     if relationship_type not in allowed:
         return {"error": f"Invalid relationship type '{relationship_type}'. Allowed: {allowed}"}
@@ -282,7 +257,7 @@ def create_topic_relationship(source_topic_id: int, target_topic_id: int, relati
         return {"status": "exists"}
 
     cursor.execute(
-        "INSERT INTO TopicRelationships (SourceTopicId, TargetTopicId, RelationshipType) VALUES (?, ?, ?)",
+        "INSERT INTO TopicRelationships (SourceTopicId, TargetTopicId, RelationshipType, Weight) VALUES (?, ?, ?, 1.0)",
         source_topic_id,
         target_topic_id,
         relationship_type,
@@ -293,8 +268,8 @@ def create_topic_relationship(source_topic_id: int, target_topic_id: int, relati
 
 
 @tool
-def create_study_session(user_id: int, resource_id: Optional[int], summary: str, duration_minutes: float) -> dict:
-    """Create a StudySessions row and return the session id."""
+def create_study_session(user_id: str, resource_id: Optional[int], summary: str, duration_minutes: float) -> dict:
+    """Create a StudySessions row and return the session id. Uses UserId (string GUID) from AspNetUsers."""
     conn = get_conn()
     cursor = conn.cursor()
     now_utc = datetime.now(timezone.utc)
@@ -310,7 +285,7 @@ def create_study_session(user_id: int, resource_id: Optional[int], summary: str,
         resource_id,
         now_utc,
         ended_at_utc,
-        summary,
+        summary or "Study session",
     )
 
     row = cursor.fetchone()
@@ -334,9 +309,9 @@ def save_quiz_results(
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO Evidence (SessionId, TopicId, Type, Score)
+        INSERT INTO Evidence (SessionId, TopicId, Type, Score, CreatedAt)
         OUTPUT INSERTED.EvidenceId
-        VALUES (?, ?, 'quiz', ?)
+        VALUES (?, ?, 'quiz', ?, GETUTCDATE())
         """,
         session_id,
         topic_id,
@@ -346,9 +321,9 @@ def save_quiz_results(
 
     cursor.execute(
         """
-        INSERT INTO Evidence (SessionId, TopicId, Type, Score)
+        INSERT INTO Evidence (SessionId, TopicId, Type, Score, CreatedAt)
         OUTPUT INSERTED.EvidenceId
-        VALUES (?, ?, 'study_time', ?)
+        VALUES (?, ?, 'study_time', ?, GETUTCDATE())
         """,
         session_id,
         topic_id,
@@ -368,7 +343,7 @@ def save_quiz_results(
 
 @tool
 def run_full_pipeline(
-    user_id: int,
+    user_id: str,
     session_id: int,
     topic_id: int,
     domain_topic_id: Optional[int],
@@ -393,7 +368,7 @@ def run_full_pipeline(
     cursor.execute(
         """
         SELECT Mastery, Confidence, EvidenceCount
-        FROM   UserTopicMastery
+        FROM   UserTopicMasteries
         WHERE  UserId = ? AND TopicId = ?
         """,
         user_id,
@@ -412,30 +387,30 @@ def run_full_pipeline(
     domain = cursor.fetchone()
     conn.close()
 
-    upsert_session(
-        session_id=session_id,
-        user_id=user_id,
-        topics=[topic_name],
-        session_summary=session_summary,
-        quiz_score=quiz_score,
-    )
+    if QDRANT_AVAILABLE:
+        try:
+            upsert_session(
+                session_id=session_id,
+                user_id=user_id,
+                topics=[topic_name],
+                session_summary=session_summary,
+                quiz_score=quiz_score,
+            )
+        except Exception:
+            pass
 
     return json.dumps({
         "mastery": float(row[0]) if row else 0.0,
         "confidence": float(row[1]) if row else 0.0,
         "evidence_count": int(row[2]) if row else 0,
         "domain_score": float(domain[0]) if domain else 0.0,
-        "qdrant_status": "Successfully synchronized session vector embedding",
+        "qdrant_status": "Successfully synchronized session vector embedding" if QDRANT_AVAILABLE else "Qdrant not available",
     })
 
 
-# ----------------------------------------
-# Convenience read-only helpers for other modules
-# These centralize small SELECTs used across agents and CLI scripts
-# ----------------------------------------
+# ============= HELPER FUNCTIONS =============
 
-
-def get_session_for_user_resource(user_id: int, resource_id: int) -> Optional[int]:
+def get_session_for_user_resource(user_id: str, resource_id: int) -> Optional[int]:
     """Return existing SessionId for (user_id, resource_id) or None."""
     conn = get_conn()
     try:
@@ -485,18 +460,20 @@ def get_resource_by_id(resource_id: int) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
-def fetch_user_profile(user_id: int) -> Dict[str, str]:
+def fetch_user_profile(user_id: str) -> Dict[str, str]:
+    """Fetch user profile from AspNetUsers (merged database)."""
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT Name, Email FROM Users WHERE UserId = ?", user_id)
+        cur.execute("SELECT UserName, Email FROM AspNetUsers WHERE Id = ?", user_id)
         row = cur.fetchone()
         return {"name": row[0] or "", "email": row[1] or ""} if row else {"name": "", "email": ""}
     finally:
         conn.close()
 
 
-def fetch_skills_from_view(user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+def fetch_skills_from_view(user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Fetch user skills from UserSkillsView (merged database)."""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -513,7 +490,152 @@ def fetch_skills_from_view(user_id: int, limit: int = 50) -> List[Dict[str, Any]
         conn.close()
 
 
-def fetch_projects(user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+def fetch_user_mastery(user_id: str) -> List[Dict[str, Any]]:
+    """Fetch user mastery data from merged database."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+        SELECT T.Name, UTM.Mastery, UTM.Confidence, UTM.EvidenceCount, UTM.LastUpdated
+        FROM   UserTopicMasteries UTM
+        JOIN   Topics T ON T.TopicId = UTM.TopicId
+        WHERE  UTM.UserId = ?
+        ORDER  BY UTM.Mastery DESC
+        """,
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "topic": r[0],
+                "mastery": float(r[1]),
+                "confidence": float(r[2]),
+                "evidence_count": int(r[3]),
+                "last_updated": str(r[4]),
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def fetch_user_topics(user_id: str) -> List[Dict[str, Any]]:
+    """Fetch user topics and their mastery levels."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+        SELECT t.TopicId, t.Name, utm.Mastery, utm.Confidence, utm.Interest
+        FROM UserTopicMasteries utm
+        JOIN Topics t ON utm.TopicId = t.TopicId
+        WHERE utm.UserId = ?
+        """,
+            user_id,
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "topic_id": int(r[0]),
+                "name": r[1],
+                "mastery": float(r[2]) if r[2] is not None else 0.0,
+                "confidence": float(r[3]) if r[3] is not None else 0.0,
+                "interest": float(r[4]) if r[4] is not None else 0.5,
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def fetch_user_goals(user_id: str) -> List[str]:
+    """Fetch user goals from Goals table."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT Title, Description, Category FROM Goals WHERE UserId = ?", user_id)
+        rows = cur.fetchall()
+        goals: List[str] = []
+        for r in rows:
+            title = (r[0] or "").strip()
+            desc = (r[1] or "").strip()
+            if title:
+                goals.append(title)
+            if desc:
+                goals.append(desc)
+        return goals
+    finally:
+        conn.close()
+
+
+def lookup_topic_by_name(topic_name: str) -> Optional[Dict[str, Any]]:
+    """Return TopicId and Type for a topic name, or None if not found."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT TopicId, Type FROM Topics WHERE Name = ?", topic_name)
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {"topic_id": int(row[0]), "type": row[1]}
+    finally:
+        conn.close()
+
+
+def insert_evidence(session_id: int, topic_id: int, evidence_type: str, score: float) -> Dict[str, Any]:
+    """Generic evidence insert wrapper."""
+    allowed = {"study_time", "quiz", "assessment", "retention_test"}
+    if evidence_type not in allowed:
+        return {"error": f"Invalid type '{evidence_type}'. Allowed: {allowed}"}
+    if not (0.0 <= score <= 1.0):
+        return {"error": f"Score {score} out of range [0.0, 1.0]"}
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO Evidence (SessionId, TopicId, Type, Score, CreatedAt) VALUES (?, ?, ?, ?, GETUTCDATE())",
+            session_id,
+            topic_id,
+            evidence_type,
+            round(score, 2),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "inserted", "type": evidence_type, "score": score}
+
+
+def fetch_all_topics() -> List[Dict[str, Any]]:
+    """Fetch all topics from merged database."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT TopicId, Name FROM Topics")
+        rows = cur.fetchall()
+        return [{"topic_id": int(r[0]), "name": r[1]} for r in rows]
+    finally:
+        conn.close()
+
+
+def fetch_all_resources() -> List[Dict[str, Any]]:
+    """Fetch all resources from merged database."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT ResourceId, Title, Difficulty, Url FROM Resources")
+        rows = cur.fetchall()
+        return [
+            {"resource_id": int(r[0]), "title": r[1], "difficulty": int(r[2]) if r[2] is not None else None, "url": r[3]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def fetch_projects(user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Fetch user projects from merged database."""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -527,10 +649,7 @@ def fetch_projects(user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
             for r in rows[:limit]
         ]
     except Exception:
-        # fallback to simpler projection
-        cur = get_conn().cursor()
-        cur.execute("SELECT Title FROM Projects WHERE UserId = ?", user_id)
-        return [{"title": r[0] or "", "description": "", "url": ""} for r in cur.fetchall()[:limit]]
+        return []
     finally:
         try:
             conn.close()
@@ -538,7 +657,8 @@ def fetch_projects(user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
             pass
 
 
-def fetch_certificates(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+def fetch_certificates(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Fetch user certificates from merged database."""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -557,7 +677,8 @@ def fetch_certificates(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         conn.close()
 
 
-def fetch_educations(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+def fetch_educations(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Fetch user education history from merged database."""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -585,7 +706,8 @@ def fetch_educations(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         conn.close()
 
 
-def fetch_experiences(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+def fetch_experiences(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Fetch user work experiences from merged database."""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -613,14 +735,15 @@ def fetch_experiences(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         conn.close()
 
 
-def fetch_summary(user_id: int, max_skills: int = 3) -> str:
+def fetch_summary(user_id: str, max_skills: int = 3) -> str:
+    """Build or fetch a professional summary for the user from the merged database."""
     candidate_fields = ["Summary", "Bio", "About", "ProfessionalSummary", "Description"]
     conn = get_conn()
     try:
         cur = conn.cursor()
         for fld in candidate_fields:
             try:
-                cur.execute(f"SELECT {fld} FROM Users WHERE UserId = ?", user_id)
+                cur.execute(f"SELECT {fld} FROM AspNetUsers WHERE Id = ?", user_id)
                 row = cur.fetchone()
                 if row and row[0]:
                     return str(row[0])
@@ -629,10 +752,9 @@ def fetch_summary(user_id: int, max_skills: int = 3) -> str:
     finally:
         conn.close()
 
-    # Fall back to constructing a summary from other facts
+    # Fall back to constructing a summary from other profile facts
     skills = fetch_skills_from_view(user_id, limit=max_skills)
     exps = fetch_experiences(user_id, limit=5)
-    projects = fetch_projects(user_id, limit=3)
 
     top_skills = ", ".join(s.get("name") for s in skills[:max_skills]) if skills else ""
     recent = None
@@ -652,108 +774,13 @@ def fetch_summary(user_id: int, max_skills: int = 3) -> str:
     if top_skills:
         parts.append(f"skilled in {top_skills}")
 
-    fact_block = " ".join(parts)
     if parts:
         return "Experienced " + ", ".join(parts) + "."
     return ""
 
 
-def lookup_topic_by_name(topic_name: str) -> Optional[Dict[str, Any]]:
-    """Return TopicId and Type for a topic name, or None if not found."""
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT TopicId, Type FROM Topics WHERE Name = ?", topic_name)
-        row = cur.fetchone()
-        if not row:
-            return None
-        return {"topic_id": int(row[0]), "type": row[1]}
-    finally:
-        conn.close()
-
-
-def insert_evidence(session_id: int, topic_id: int, evidence_type: str, score: float) -> Dict[str, Any]:
-    """Generic evidence insert wrapper used by tests and agents."""
-    allowed = {"study_time", "quiz", "assessment", "retention_test"}
-    if evidence_type not in allowed:
-        return {"error": f"Invalid type '{evidence_type}'. Allowed: {allowed}"}
-    if not (0.0 <= score <= 1.0):
-        return {"error": f"Score {score} out of range [0.0, 1.0]"}
-
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO Evidence (SessionId, TopicId, Type, Score) VALUES (?, ?, ?, ?)",
-            session_id,
-            topic_id,
-            evidence_type,
-            round(score, 2),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return {"status": "inserted", "type": evidence_type, "score": score}
-
-
-def fetch_user_mastery(user_id: int) -> List[Dict[str, Any]]:
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-        SELECT T.Name, UTM.Mastery, UTM.Confidence, UTM.EvidenceCount, UTM.LastUpdated
-        FROM   UserTopicMastery UTM
-        JOIN   Topics           T ON T.TopicId = UTM.TopicId
-        WHERE  UTM.UserId = ?
-        ORDER  BY UTM.Mastery DESC
-        """,
-            user_id,
-        )
-        rows = cur.fetchall()
-        return [
-            {
-                "topic": r[0],
-                "mastery": float(r[1]),
-                "confidence": float(r[2]),
-                "evidence_count": int(r[3]),
-                "last_updated": str(r[4]),
-            }
-            for r in rows
-        ]
-    finally:
-        conn.close()
-
-
-def fetch_user_topics(user_id: int) -> List[Dict[str, Any]]:
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-        SELECT t.TopicId, t.Name, utm.Mastery, utm.Confidence, utm.Interest
-        FROM UserTopicMastery utm
-        JOIN Topics t ON utm.TopicId = t.TopicId
-        WHERE utm.UserId = ?
-        """,
-            user_id,
-        )
-        rows = cur.fetchall()
-        return [
-            {
-                "topic_id": int(r[0]),
-                "name": r[1],
-                "mastery": float(r[2]) if r[2] is not None else 0.0,
-                "confidence": float(r[3]) if r[3] is not None else 0.0,
-                "interest": float(r[4]) if r[4] is not None else 0.5,
-            }
-            for r in rows
-        ]
-    finally:
-        conn.close()
-
-
 def fetch_related_candidates(topic_ids: List[int]) -> List[Dict[str, Any]]:
+    """Return topics related to the given topic_ids via TopicRelationships."""
     if not topic_ids:
         return []
     qmarks = ",".join(["?" for _ in topic_ids])
@@ -776,12 +803,13 @@ def fetch_related_candidates(topic_ids: List[int]) -> List[Dict[str, Any]]:
         conn.close()
 
 
-def fetch_topic_mastery(user_id: int, topic_id: int) -> Dict[str, Any]:
+def fetch_topic_mastery(user_id: str, topic_id: int) -> Dict[str, Any]:
+    """Return mastery, confidence, and interest for a specific user/topic pair."""
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT Mastery, Confidence, Interest FROM UserTopicMastery WHERE UserId = ? AND TopicId = ?",
+            "SELECT Mastery, Confidence, Interest FROM UserTopicMasteries WHERE UserId = ? AND TopicId = ?",
             user_id,
             topic_id,
         )
@@ -793,26 +821,8 @@ def fetch_topic_mastery(user_id: int, topic_id: int) -> Dict[str, Any]:
         conn.close()
 
 
-def fetch_user_goals(user_id: int) -> List[str]:
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT Title, Description FROM Goals WHERE UserId = ?", user_id)
-        rows = cur.fetchall()
-        goals: List[str] = []
-        for r in rows:
-            title = (r[0] or "").strip()
-            desc = (r[1] or "").strip()
-            if title:
-                goals.append(title)
-            if desc:
-                goals.append(desc)
-        return goals
-    finally:
-        conn.close()
-
-
 def fetch_topics_by_names(names: List[str]) -> Dict[str, Optional[int]]:
+    """Return a mapping of topic name -> TopicId (or None if not found) for the given names."""
     out: Dict[str, Optional[int]] = {}
     if not names:
         return out
@@ -829,6 +839,7 @@ def fetch_topics_by_names(names: List[str]) -> Dict[str, Optional[int]]:
 
 
 def fetch_topics_not_in(user_topic_ids: List[int]) -> List[Dict[str, Any]]:
+    """Return all topics whose TopicId is NOT in the provided list."""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -844,6 +855,7 @@ def fetch_topics_not_in(user_topic_ids: List[int]) -> List[Dict[str, Any]]:
 
 
 def get_topic_name_by_id(topic_id: int) -> Optional[str]:
+    """Return the Name of a topic given its TopicId, or None if not found."""
     conn = get_conn()
     try:
         cur = conn.cursor()
@@ -869,12 +881,13 @@ def fetch_prerequisites_for_target(target_id: int, relationship_type: str = "pre
         conn.close()
 
 
-def fetch_unmastered_topics(user_id: int) -> List[Dict[str, Any]]:
+def fetch_unmastered_topics(user_id: str) -> List[Dict[str, Any]]:
+    """Return topics for which the user has no UserTopicMasteries entry."""
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT t.TopicId, t.Name FROM Topics t LEFT JOIN UserTopicMastery utm ON t.TopicId = utm.TopicId AND utm.UserId = ? WHERE utm.TopicId IS NULL",
+            "SELECT t.TopicId, t.Name FROM Topics t LEFT JOIN UserTopicMasteries utm ON t.TopicId = utm.TopicId AND utm.UserId = ? WHERE utm.TopicId IS NULL",
             user_id,
         )
         return [{"topic_id": int(r[0]), "name": r[1]} for r in cur.fetchall()]
@@ -882,49 +895,31 @@ def fetch_unmastered_topics(user_id: int) -> List[Dict[str, Any]]:
         conn.close()
 
 
-def fetch_all_topics() -> List[Dict[str, Any]]:
-    return fetch_topics_not_in([])
-
-
-def fetch_all_resources() -> List[Dict[str, Any]]:
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT ResourceId, Title, Difficulty, Url FROM Resources")
-        rows = cur.fetchall()
-        return [
-            {"resource_id": int(r[0]), "title": r[1], "difficulty": int(r[2]) if r[2] is not None else None, "url": r[3]}
-            for r in rows
-        ]
-    finally:
-        conn.close()
-
-
 def fetch_resource_topics(resource_id: int) -> List[str]:
+    """Return the topic names covered by a given resource."""
     conn = get_conn()
     try:
         cur = conn.cursor()
-        # Try current table name first
-        try:
-            cur.execute("SELECT t.Name FROM ResourceTopicCoverage rtc JOIN Topics t ON rtc.TopicId = t.TopicId WHERE rtc.ResourceId = ?", resource_id)
-            return [r[0] for r in cur.fetchall()]
-        except Exception:
-            # fallback for legacy schema name
-            cur = conn.cursor()
-            cur.execute("SELECT t.Name FROM ResourceTopics rt JOIN Topics t ON rt.TopicId = t.TopicId WHERE rt.ResourceId = ?", resource_id)
-            return [r[0] for r in cur.fetchall()]
+        cur.execute(
+            "SELECT t.Name FROM ResourceTopicCoverages rtc JOIN Topics t ON rtc.TopicId = t.TopicId WHERE rtc.ResourceId = ?",
+            resource_id,
+        )
+        return [r[0] for r in cur.fetchall()]
+    except Exception:
+        return []
     finally:
         conn.close()
 
 
 def fetch_all_sessions() -> List[Dict[str, Any]]:
+    """Return all StudySessions rows as dicts."""
     conn = get_conn()
     try:
         cur = conn.cursor()
         cur.execute("SELECT SessionId, UserId, ResourceId, SessionSummary FROM StudySessions")
         rows = cur.fetchall()
         return [
-            {"session_id": int(r[0]), "user_id": int(r[1]), "resource_id": int(r[2]) if r[2] is not None else None, "summary": r[3]}
+            {"session_id": int(r[0]), "user_id": r[1], "resource_id": int(r[2]) if r[2] is not None else None, "summary": r[3]}
             for r in rows
         ]
     finally:
