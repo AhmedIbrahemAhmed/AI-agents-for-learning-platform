@@ -180,6 +180,7 @@ class SessionChatRequest(BaseModel):
     session_id: int
     query: str
     max_chunks: int = 8
+    save_conversation: bool = False
 
 
 class RoadmapRequest(BaseModel):
@@ -623,14 +624,19 @@ def assistant_session_query(request: SessionChatRequest):
             "session_id": request.session_id,
             "query": request.query,
             "max_chunks": request.max_chunks,
+            "save_conversation": request.save_conversation,
         }
     )
     if isinstance(result, dict) and result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("error"))
 
-    # store assistant reply in ephemeral cache (best-effort)
+    # store assistant reply in ephemeral cache if we are not already persisting it.
     try:
-        if isinstance(result, dict) and result.get("answer"):
+        if (
+            isinstance(result, dict)
+            and result.get("answer")
+            and not request.save_conversation
+        ):
             append_session_turn.invoke(
                 {
                     "user_id": request.user_id,

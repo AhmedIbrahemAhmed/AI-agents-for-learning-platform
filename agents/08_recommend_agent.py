@@ -5,7 +5,7 @@ from recommendation_agent import recommend_topics_for_user
 
 def main():
     parser = argparse.ArgumentParser(description="Recommendation CLI")
-    parser.add_argument("--user_id", type=int, required=True)
+    parser.add_argument("--user_id", type=str, required=True)
     parser.add_argument("--max", type=int, default=5)
     parser.add_argument("--goals", type=str, default="", help="Comma-separated goal texts to bias recommendations")
     args = parser.parse_args()

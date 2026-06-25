@@ -28,7 +28,7 @@ from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
 
 
-def _fetch_user_topics(conn, user_id: int) -> List[Dict[str, Any]]:
+def _fetch_user_topics(conn, user_id: str) -> List[Dict[str, Any]]:
     return fetch_user_topics(user_id)
 
 
@@ -36,7 +36,7 @@ def _fetch_related_candidates(conn, topic_ids: List[int]) -> List[Dict[str, Any]
     return fetch_related_candidates(topic_ids)
 
 
-def _fetch_topic_mastery(conn, topic_id: int, user_id: int):
+def _fetch_topic_mastery(conn, topic_id: int, user_id: str):
     return fetch_topic_mastery(user_id, topic_id)
 
 
@@ -54,11 +54,11 @@ def _score_candidate(candidate, user_metrics, rel_type: str) -> float:
     return max(0.0, min(1.0, score))
 
 
-def _fetch_user_goals(conn, user_id: int) -> List[str]:
+def _fetch_user_goals(conn, user_id: str) -> List[str]:
     return fetch_user_goals(user_id)
 
 
-def _weakness_topics(conn, user_id: int, max_recs: int = 5) -> List[Dict[str, Any]]:
+def _weakness_topics(conn, user_id: str, max_recs: int = 5) -> List[Dict[str, Any]]:
     user_topics = _fetch_user_topics(conn, user_id)
     weakest = sorted(user_topics, key=lambda x: x["mastery"])[:max_recs]
     out: List[Dict[str, Any]] = []
@@ -75,7 +75,7 @@ def _weakness_topics(conn, user_id: int, max_recs: int = 5) -> List[Dict[str, An
 
 
 @tool
-def recommend_topics_for_user(user_id: int, max_recs: int = 5, goal_texts: Optional[List[str]] = None, enable_llm: bool = True, similarity_threshold: float = 0.65) -> Dict[str, Any]:
+def recommend_topics_for_user(user_id: str, max_recs: int = 5, goal_texts: Optional[List[str]] = None, enable_llm: bool = True, similarity_threshold: float = 0.65) -> Dict[str, Any]:
     """Recommend topics for a user, considering goals and studied topics. Returns topics ranked by relevance (0..1)."""
     conn = get_conn()
     try:
@@ -310,7 +310,7 @@ recommend_next_topics = recommend_topics_for_user
 
 
 @tool
-def get_weakness_topics(user_id: int, max_recs: int = 5) -> Dict[str, Any]:
+def get_weakness_topics(user_id: str, max_recs: int = 5) -> Dict[str, Any]:
     """Expose user's weakest topics as a tool for the API."""
     conn = get_conn()
     try:
@@ -424,7 +424,7 @@ def generate_structured_curriculum_via_knowledge(goal_text: str) -> List[str]:
 
 @tool
 def generate_roadmap_for_user(
-    user_id: int,
+    user_id: str,
     steps: int = 6,
     goal_text: Optional[str] = None,
 ) -> Dict[str, Any]:

@@ -15,7 +15,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
-def _call_recommend(user_id: int, max_recs: int = 5) -> Dict[str, Any]:
+def _call_recommend(user_id: str, max_recs: int = 5) -> Dict[str, Any]:
     """Call the local /recommend/topics endpoint and return JSON."""
     url = f"{API_BASE}/recommend/topics"
     resp = httpx.post(url, json={"user_id": user_id, "max_recs": max_recs}, timeout=30.0)
@@ -42,7 +42,7 @@ def _answer_with_llm(prompt: str) -> str:
     return getattr(resp, "content", str(resp))
 
 
-def handle_query(user_id: int, query: str, max_recs: int = 5) -> Dict[str, Any]:
+def handle_query(user_id: str, query: str, max_recs: int = 5) -> Dict[str, Any]:
     """Main router for user queries.
 
     - If the query mentions 'recommend' it calls the recommendation API.
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     import argparse
 
     p = argparse.ArgumentParser(description="General assistant that can call other agents or answer queries.")
-    p.add_argument("--user_id", type=int, default=1)
+    p.add_argument("--user_id", type=str, default=1)
     p.add_argument("--query", type=str, required=True)
     p.add_argument("--max", type=int, default=5, dest="max_recs")
     args = p.parse_args()

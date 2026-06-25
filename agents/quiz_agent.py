@@ -46,7 +46,7 @@ def run_quiz_interactively(questions: list) -> tuple:
     return correct, len(questions), results
 
 
-def run_quiz_agent(url: str, user_id: int, source_type: str = "youtube"):
+def run_quiz_agent(url: str, user_id: str, source_type: str = "youtube"):
     print(f"\n{'=' * 60}")
     print(f"  Quiz Agent — Hardened Dynamic Source Mode")
     print(f"  User: {user_id}  |  URL: {url}")

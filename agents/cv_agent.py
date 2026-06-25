@@ -32,22 +32,22 @@ def escape_latex(s: str) -> str:
 def _format_date(d: Any) -> str:
     return d.strftime('%Y-%m') if hasattr(d, 'strftime') else (str(d) if d else '')
 
-def fetch_user_profile(user_id: int) -> Dict[str, str]:
+def fetch_user_profile(user_id: str) -> Dict[str, str]:
     return db_fetch_user_profile(user_id)
 
-def fetch_skills_from_view(user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+def fetch_skills_from_view(user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
     return db_fetch_skills_from_view(user_id, limit)
 
-def fetch_projects(user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+def fetch_projects(user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
     return db_fetch_projects(user_id, limit)
 
-def fetch_certificates(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+def fetch_certificates(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     return db_fetch_certificates(user_id, limit)
 
-def fetch_educations(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+def fetch_educations(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     return db_fetch_educations(user_id, limit)
 
-def fetch_experiences(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+def fetch_experiences(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     return db_fetch_experiences(user_id, limit)
 
 def render_skills_latex(skills: List[Dict[str, Any]]) -> str:
@@ -123,7 +123,7 @@ def render_experiences_latex(exps: List[Dict[str, Any]]) -> str:
     lines.append("\\end{itemize}")
     return "\n".join(lines)
 
-def fetch_summary(user_id: int, max_skills: int = 3) -> str:
+def fetch_summary(user_id: str, max_skills: int = 3) -> str:
     return db_fetch_summary(user_id, max_skills)
 
     # Gather structured facts for prompt
@@ -195,7 +195,7 @@ def fetch_summary(user_id: int, max_skills: int = 3) -> str:
         return "Experienced " + ", ".join(parts) + "."
     return ""
 
-def generate_cv_latex(user_id: int, template_name: str = "simple_cv") -> Tuple[str, str]:
+def generate_cv_latex(user_id: str, template_name: str = "simple_cv") -> Tuple[str, str]:
     tpl_path = os.path.join("templates", "cv", f"{template_name}.tex")
     if not os.path.exists(tpl_path):
         raise FileNotFoundError(f"Template not found: {tpl_path}")
@@ -231,5 +231,5 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python agents/cv_agent.py <user_id>")
     else:
-        path, raw_latex = generate_cv_latex(int(sys.argv[1]))
+        path, raw_latex = generate_cv_latex(sys.argv[1])
         print(json.dumps({"tex_path": path, "latex": raw_latex}, indent=4))
