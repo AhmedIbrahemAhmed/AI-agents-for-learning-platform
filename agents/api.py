@@ -9,6 +9,8 @@ from content_loader import fetch_source_content
 from cv_agent import generate_cv_latex
 from database_tools import (
     create_study_session,
+    deduct_user_session_minutes,
+    deduce_video_duration_from_user_session_minutes,
     get_or_create_resource,
     get_or_create_topic,
     run_full_pipeline,
@@ -458,6 +460,46 @@ def session_complete(request: SessionCompleteRequest):
 
     session_id = request.session_id
     topic_updates: List[Dict[str, Any]] = []
+
+    duration_minutes = request.duration_minutes
+    if duration_minutes is not None and request.user_id:
+        try:
+            remaining_minutes = deduct_user_session_minutes.invoke(
+                {
+                    "user_id": request.user_id,
+                    "duration_minutes": duration_minutes,
+                }
+            )
+            logger.debug(
+                "Deducted %s minutes from user %s session quota. Remaining minutes=%s",
+                duration_minutes,
+                request.user_id,
+                remaining_minutes,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to deduct user session minutes for user %s: %s",
+                request.user_id,
+                e,
+            )
+    elif duration_minutes is None and request.user_id:
+        try:
+            deduced_duration = deduce_video_duration_from_user_session_minutes.invoke(
+                {"user_id": request.user_id}
+            )
+            if deduced_duration is not None:
+                duration_minutes = float(deduced_duration)
+                logger.debug(
+                    "Deduced duration_minutes=%s from AspNetUsers.SessionMinutes for user %s",
+                    deduced_duration,
+                    request.user_id,
+                )
+        except Exception as e:
+            logger.debug(
+                "deduce_video_duration_from_user_session_minutes failed for user %s: %s",
+                request.user_id,
+                e,
+            )
 
     for item in request.topic_results:
         tid = item.topic_id

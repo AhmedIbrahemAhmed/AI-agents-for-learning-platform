@@ -460,6 +460,55 @@ def get_resource_by_id(resource_id: int) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+@tool
+def deduce_video_duration_from_user_session_minutes(user_id: str) -> Optional[int]:
+    """Return the user's AspNetUsers.SessionMinutes value as a deduced video duration in minutes."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT SessionMinutes FROM AspNetUsers WHERE Id = ?",
+            user_id,
+        )
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        return int(row[0])
+    finally:
+        conn.close()
+
+
+@tool
+def deduct_user_session_minutes(user_id: str, duration_minutes: float) -> Optional[int]:
+    """Subtract duration_minutes from the user's AspNetUsers.SessionMinutes and return the remaining minutes."""
+    if duration_minutes is None:
+        return None
+
+    minutes_to_deduct = max(0, int(round(duration_minutes)))
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT SessionMinutes FROM AspNetUsers WHERE Id = ?",
+            user_id,
+        )
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+
+        current_minutes = int(row[0])
+        remaining_minutes = max(0, current_minutes - minutes_to_deduct)
+        cur.execute(
+            "UPDATE AspNetUsers SET SessionMinutes = ? WHERE Id = ?",
+            remaining_minutes,
+            user_id,
+        )
+        conn.commit()
+        return remaining_minutes
+    finally:
+        conn.close()
+
+
 def fetch_user_profile(user_id: str) -> Dict[str, str]:
     """Fetch user profile from AspNetUsers (merged database)."""
     conn = get_conn()
@@ -924,3 +973,5 @@ def fetch_all_sessions() -> List[Dict[str, Any]]:
         ]
     finally:
         conn.close()
+
+
