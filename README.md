@@ -34,7 +34,7 @@ pypdf (Native binary PDF ingestion)
 🚀 Quickstart & Setup Guide
 Execute the setup routines sequentially to establish an isolated local development runtime.
 
-1. Environment Isolation
+# 1. Environment Isolation
 Clone the project repository and initialize a clean virtual environment from the workspace root.
 
 Windows (PowerShell):
@@ -47,12 +47,12 @@ macOS / Linux:
 Bash
 python -m venv .venv
 source .venv/bin/activate
-2. Dependency Management
+# 2. Dependency Management
 Install the foundational third-party application packages:
 
 Bash
 pip install -r requirements.txt
-3. Application Configuration (.env)
+# 3. Application Configuration (.env)
 Generate your local application environment file from the version-controlled specification baseline.
 
 Windows (PowerShell): copy .env.example .env
@@ -61,193 +61,187 @@ macOS / Linux: cp .env.example .env
 
 ⚠️ CRITICAL SECURITY NOTE: Never commit your filled .env file to version control. Configuration mutations must track strictly via changes to .env.example.
 
-4. Relational Database Setup (SQL Server)
-Apply the relational operational database schema patterns and seed baseline canonical master data using SQL Server Management Studio (SSMS) or sqlcmd.
+# 4. SQL Server Database Setup
 
-Using Windows sqlcmd (SQL Authentication Standard):
+The project uses Entity Framework Core migrations to create the database schema.
 
-PowerShell
-# Step A: Apply latest DDL schema definitions
-sqlcmd -S "localhost\SQLEXPRESS" -U <db_user> -P <db_password> -i "database\latest database schema.sql"
+## Step 1 — Configure the connection string
 
-# Step B: Seed core database with instructional taxonomies (Optional)
-sqlcmd -S "localhost\SQLEXPRESS" -U <db_user> -P <db_password> -i "database\03_seed_data.sql"
-Note: For Windows Integrated Authentication, omit the -U and -P flags and append -E to the command parameters.
+Update your `.env` (or `appsettings.json`) with your SQL Server connection string.
 
-5. Vector Database Initialization (Qdrant)
-Spin up the vector data store instance inside a detached Docker container space:
+Example:
 
-Bash
+```text
+Server=localhost\SQLEXPRESS;
+Database=LearningCoachAI;
+Trusted_Connection=True;
+TrustServerCertificate=True;
+```
+
+## Step 2 — Apply database migrations
+
+From the Backend project directory, run:
+
+```bash
+dotnet ef database update
+```
+
+This creates all required database tables automatically.
+
+## Step 3 — Create stored procedures and database view
+
+After the migration completes, open SQL Server Management Studio and execute:
+
+```
+database/stored_procedures_and_view.sql
+```
+
+This creates all required stored procedures and database views used by the application.
+
+# 5. Qdrant Setup
+
+Start the Qdrant container:
+
+```bash
 docker compose up -d qdrant
-(Optional) Verify container health status:
+```
 
-Bash
-curl -s http://localhost:6333/health
-Once verified online, instantiate the required isolated target application collections by executing the unified configuration setup:
+(Optional) Verify the container is running:
 
-Bash
+```bash
+curl http://localhost:6333/health
+```
+
+Create the required Qdrant collections:
+
+```bash
 python scripts/02_qdrant_setup.py
-6. Relational-to-Vector Pipeline Sync & Backfill
-If you populated your relational store with seed metadata during step 4, trigger the unified system sync agent to seed the Qdrant vector spaces. backfill_all.py natively coordinates multi-tier synchronizations:
+```
 
-Bash
-# Option A: Full Sync (Topics, System Resources, User Sessions, and Video/Asset Chunks)
-python scripts/backfill_all.py --all --session-chunks
-
-# Option B: Granular Execution Patterns
-python scripts/backfill_all.py --topics          # Sync canonical learning topics only
-python scripts/backfill_all.py --resources       # Sync system resource data only
-python scripts/backfill_all.py --sessions        # Sync study sessions metadata only
-python scripts/backfill_all.py --session-chunks  # Fetch external source assets and sync dense text chunks
-💡 Developer Automation Note: Executing with the --all argument or providing no flags defaults to syncing basic metadata layers. Append --session-chunks explicitly when you require the background workers to reach out externally to parse active remote media transcripts (e.g., pulling raw YouTube texts).
-
-🏃‍♂️ Recommended System Run Order
-To bring the entire software ecosystem online seamlessly, follow this end-to-end boot sequence:
-
-[1. SQL Server Engine] ──> [2. Docker Qdrant Node] ──> [3. Fast API Gateway] ──> [4. Pipelines / CLI Testing]
-Ensure your local SQL Server instance is active and accessible.
-
-Ensure Qdrant is initialized (docker compose up -d qdrant + initialization scripts).
-
-Boot the core application FastAPI HTTP Gateway Engine:
-
-Bash
-python launcher.py
-# Alternative direct Uvicorn execution pattern:
-uvicorn agents.api:api --host 0.0.0.0 --port 8000 --reload
-Verify overall ingestion capabilities through an automated CLI intake pipeline trial run:
-
-Bash
-python agents/07_quiz_agent.py --url "https://www.youtube.com/watch?v=VIDEO_ID" --user_id 1 --source_type youtube
-⚡ Core API Endpoints Reference
-The network gateway spins up by default on http://localhost:8000. Standardized interactions across active operations utilize the templates below.
+This script initializes all vector collections required by the application.
 
 
-# Endpoints:
 
 
-🎥 1. Content Preparation, Ingestion, and Contextual Chunking
-Submits educational target assets (e.g., YouTube video links, web blogs) to the backend engine to ingest, slice, and preprocess raw text layers.
+# 🏃‍♂️ Recommended Startup Order
 
-Standard Media Intake Payload:
+Start the application components in the following order:
 
-Bash
-curl -s -X POST http://localhost:8000/content/prepare \
-  -H "Content-Type: application/json" \
-  -d '{"source_type":"youtube","url":"https://youtu.be/VIDEO_ID"}'
-Resource Processing with Session Lifecycle Binding:
-Passing create_session: true triggers an idempotent upsert sequence for a given user_id, mapping directly to existing records or registering a new StudySession. It returns a unique session_id and an asset session_summary.
+1. SQL Server
+2. Qdrant
 
-Bash
-curl -s -X POST http://localhost:8000/content/prepare \
-  -H "Content-Type: application/json" \
-  -d '{"source_type":"youtube","url":"https://youtu.be/VIDEO_ID","user_id":1,"create_session":true}'
-Web Blogs and Documents:
+```bash
+docker compose up -d qdrant
+```
 
-Bash
-curl -s -X POST http://localhost:8000/content/prepare \
-  -H "Content-Type: application/json" \
-  -d '{"source_type":"blog","url":"https://example.com/article","user_id":1,"create_session":true}'
-Native Binary PDF Documents Endpoint:
+3. Backend API
 
-Bash
-curl -s -X POST http://localhost:8000/content/prepare/pdf \
-  -H "Content-Type: application/json" \
-  -d '{"url":"https://example.com/document.pdf","user_id":1,"create_session":true}'
-📝 2. Generative Evaluation Quiz Engine
-Generates domain-grounded evaluation metrics focusing directly on specific taxonomies and raw context chunk parameters.
+```bash
+dotnet run
+```
 
-Bash
-curl -s -X POST http://localhost:8000/quiz/generate \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Intro to ML","topic_names":["Supervised Learning","Loss Functions"],"content_chunks":["chunk1 text","chunk2 text"]}'
-💾 3. Complete and Persist Study Session
-Persists user operational analytics, updates skill gaps, and records final user session telemetry.
+or
 
-Bash
-curl -s -X POST http://localhost:8000/session/complete \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": 1,
-    "session_id": 1234,
-    "session_summary": "Reviewed supervised learning",
-    "topic_results": [{"topic_name": "Supervised Learning", "quiz_score": 0.78, "study_completion": 0.9}],
-    "content_chunks": ["chunk 1 text", "chunk 2 text"]
-  }'
+```bash
+dotnet watch run
+```
 
-Persistence note: Recent updates add an ephemeral in-memory session cache used to capture live chat turns during an active session. When `/session/complete` is called, the system will:
+The API will be available at:
 
-- Persist any provided `content_chunks` into `SessionChunkEmbeddings` (as before).
-- Persist ephemeral cached chat turns (role + text) into a new Qdrant collection named `SessionChatHistory`.
-- Clear the in-memory cache for that `session_id` after persisting.
+```
+http://localhost:8000
+```
+# API Endpoints
 
-This behavior means interactive assistant exchanges (user and assistant turns) are now preserved for later retrieval and semantic search. The Postman collection included in this repo contains an example flow `Assistant Session Query` -> `Session Complete (persist chat history)` that demonstrates this end-to-end flow.
-📊 4. Algorithmic Recommendations & Personalization Roadmaps
-Generates analytical performance-driven data selections targeting individual learning vectors.
+The repository includes a Postman collection containing example requests for all available endpoints.
 
-Predictive Next Topic Recommendations:
+Import:
 
-Bash
-curl -s -X POST http://localhost:8000/recommend/topics \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":1,"max_recs":5, "goals": ["Prepare for ML job interviews"]}'
-Identify Weakest System Learning Topics:
+```
+postman_collection.json
+```
 
-Bash
-curl -s -X POST http://localhost:8000/recommend/weaknesses \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":1,"max_recs":5}'
-Generate Linear Personalized Curriculum Roadmap:
+Base URL:
 
-Bash
-curl -s -X POST http://localhost:8000/recommend/roadmap \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":1,"steps":6, "goal_text": "I want to be a dotnet developer"}'
-🤖 5. Freeform AI Multi-Agent Assistants
-Interfaces with general and session-isolated system intelligence domains.
+```
+http://localhost:8000
+```
 
-Global System Assistant Endpoint:
+## Content APIs
 
-Bash
-curl -s -X POST http://localhost:8000/assistant/query \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":1,"query":"Recommend next topics for me","max_recs":5}'
-Session-Isolated Grounded Assistant:
-Interactions here query explicitly against local asset contexts parsed out inside specific active study workflows.
+| Endpoint | Description |
+|----------|-------------|
+| POST `/content/prepare` | Prepare content from YouTube or articles |
+| POST `/content/prepare/pdf` | Prepare PDF documents |
 
-Bash
-curl -s -X POST http://localhost:8000/assistant/session_query \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":1,"session_id":123,"query":"What was the main idea in the video?","max_chunks":6}'
-📄 Automated LaTeX CV Generation
-The platform features an advanced LaTeX resume synthesis module that programmatically translates tracked instructional topic masteries directly into verifiable curriculum vitae skills.
+---
 
-Generation Request
-Bash
-curl -s -X POST http://localhost:8000/cv/generate \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":1, "template_name":"simple_cv"}'
-JSON Response Properties:
+## Session APIs
 
-tex_path: Path reference to the compiled .tex resource file residing under outputs/cv/.
+| Endpoint | Description |
+|----------|-------------|
+| POST `/session/complete` | Complete a learning session and update user progress |
 
-latex: Raw text containing complete rendered LaTeX structural markdown formatting.
+---
 
-🗄️ CV Data Topology & Expansion Patch Mapping
-The architecture leverages a progressive multi-tier data model schema to manage systemic resume generation:
+## Assistant APIs
 
-[Topics + Mastery Matrices] ──> [UserSkillsView] ──> [CV Agent Engine] ──> [TeX Template File]
-Fast Iteration Mode: Maps runtime masteries into skills utilizing a lightweight tracking view UserSkillsView (Synthesized via UserTopicMastery combined with Topics).
+| Endpoint | Description |
+|----------|-------------|
+| POST `/assistant/session_query` | Ask questions about the current study session |
 
-Production Schema Foundations: For complete work histories, expand system telemetry tables using the localized patch configurations provided in the workspace repository:
+---
 
-database/04_cv_patch.sql: Extends database instances with structural UserSkillsView, Educations, and Experiences metrics.
+## Recommendation APIs
 
-database/05_cv_projects_certificates_patch.sql: Maps explicit data columns directly onto relational Projects structures and instantiates robust tracking for Certificates.
+| Endpoint | Description |
+|----------|-------------|
+| POST `/recommend/topics` | Recommend next learning topics |
+| POST `/recommend/weaknesses` | Recommend topics based on weaknesses |
+| POST `/recommend/roadmap` | Generate a personalized learning roadmap |
 
-agents/cv_agent.py: Runtime file handling templates translation execution routines.
+---
 
-templates/cv/simple_cv.tex: Baseline baseline layout configurations.
+## Quiz API
+
+| Endpoint | Description |
+|----------|-------------|
+| POST `/quiz/generate` | Generate quizzes from prepared content |
+
+---
+
+## CV API
+
+| Endpoint | Description |
+|----------|-------------|
+| POST `/cv/generate` | Generate a LaTeX CV from the user's learning progress |
+
+---
+## API Workflow
+
+The intended sequence of API calls is:
+1. POST /content/prepare
+          │
+          ▼
+2. POST /quiz/generate
+          │
+          ▼
+3. POST /session/complete
+          │
+          ▼
+4. Use one or more of:
+   • POST /assistant/session_query
+   • POST /assistant/query
+   • POST /recommend/topics
+   • POST /recommend/weaknesses
+   • POST /recommend/roadmap
+   • POST /cv/generate
+
+## Debug API
+
+| Endpoint | Description |
+|----------|-------------|
+| POST `/debug/session_chunks` | Inspect stored session chunks for debugging |
 
 🧪 Validation & Testing Suite
 Maintain comprehensive baseline validation requirements across runtime instances using the integrated pytest testing execution setup.
