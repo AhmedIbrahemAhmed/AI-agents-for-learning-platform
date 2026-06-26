@@ -3,7 +3,10 @@ import os
 import time
 from typing import Optional
 import logging
-
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
+import uuid
 _model = None
 _qdrant = None
 
@@ -18,13 +21,13 @@ VECTOR_SIZE = 768
 def _get_embedder():
     global _model, _EMBEDDING_MODEL
     if _model is None:
-        from sentence_transformers import SentenceTransformer
+        
 
         _model = SentenceTransformer(_EMBEDDING_MODEL)
     return _model
 
 
-def _get_qdrant_client(retries: int = 3, backoff: float = 0.5):
+def _get_qdrant_client(retries: int = 3, backoff: float = 0.5) -> QdrantClient:
     global _qdrant, _QDRANT_URL, _QDRANT_HOST, _QDRANT_PORT, _QDRANT_API_KEY
     if _qdrant is not None:
         return _qdrant
@@ -38,15 +41,20 @@ def _get_qdrant_client(retries: int = 3, backoff: float = 0.5):
                 _qdrant = QdrantClient(url=_QDRANT_URL, api_key=_QDRANT_API_KEY)
             else:
                 _qdrant = QdrantClient(host=_QDRANT_HOST, port=_QDRANT_PORT)
-            # quick ping: list_collections will raise if not reachable
+            
+            # Ping test
             _qdrant.get_collections()
             return _qdrant
         except Exception as e:
             last_err = e
             if attempt < retries:
                 time.sleep(backoff * attempt)
-            else:
-                raise
+    
+    # If the loop finishes without returning, explicitly raise the error 
+    # so Python/Pylance knows it's impossible to reach a "return None" state.
+    if last_err:
+        raise last_err
+    raise RuntimeError("Failed to connect to Qdrant cluster.")
 
 
 def is_qdrant_available() -> bool:
@@ -56,7 +64,6 @@ def is_qdrant_available() -> bool:
     except Exception:
         return False
 
-from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 
 
 # ── Core embed function ───────────────────────────────────────
@@ -145,22 +152,22 @@ def upsert_session(
 
 def search_similar_resources(
     query: str,
-    topic: str = None,
     limit: int = 5,
+    topic: str= "",
 ) -> list[dict]:
     """
     Semantic search over ResourceEmbeddings.
     Optionally filters by topic name.
     """
     vector = embed(query)
-    client = _get_qdrant_client()
+    client: QdrantClient = _get_qdrant_client()
     search_filter = None
     if topic:
         search_filter = Filter(
             must=[FieldCondition(key="topics", match=MatchValue(value=topic))]
         )
 
-    results = client.search(
+    results = client.search( # type: ignore
         collection_name="ResourceEmbeddings",
         query_vector=vector,
         query_filter=search_filter,
@@ -188,8 +195,8 @@ def search_user_sessions(
     Used by the Assistant Agent to retrieve relevant past context.
     """
     vector = embed(query)
-    client = _get_qdrant_client()
-    results = client.search(
+    client: QdrantClient = _get_qdrant_client()
+    results = client.search( # type: ignore
         collection_name="SessionEmbeddings",
         query_vector=vector,
         query_filter=Filter(
@@ -234,7 +241,7 @@ def upsert_session_chunks(
             "created_at": now,
         }
         # Use UUID point IDs to satisfy Qdrant's id requirements
-        import uuid
+        
         pid = str(uuid.uuid4())
         # payload prepared for upsert
         points.append(PointStruct(id=pid, vector=vec, payload=payload))
@@ -256,7 +263,7 @@ def search_session_chunks(user_id: str, query: str, limit: int = 5) -> list[dict
     """
     vector = embed(query)
     client = _get_qdrant_client()
-    results = client.search(
+    results = client.search( # type: ignore
         collection_name="SessionChunkEmbeddings",
         query_vector=vector,
         query_filter=Filter(
@@ -377,7 +384,6 @@ def upsert_session_chat_history(
     client = _get_qdrant_client()
     points = []
     now = datetime.now(timezone.utc).isoformat()
-    import uuid
 
     for i, t in enumerate(chat_turns, start=1):
         text = t.get("text") or ""
@@ -433,7 +439,7 @@ def search_similar_topics(query: str, limit: int = 5) -> list:
     vector = embed(query)
     client = _get_qdrant_client()
     try:
-        results = client.search(collection_name=TOPIC_COLLECTION, query_vector=vector, limit=limit)
+        results = client.search(collection_name=TOPIC_COLLECTION, query_vector=vector, limit=limit) # type: ignore
     except Exception:
         return []
 

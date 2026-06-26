@@ -93,7 +93,11 @@ def persist_session_chat_history(
         return {"error": f"Failed to upsert session chat history: {e}"}
 
     if clear_cache:
-        clear_session_cache(session_id)
+        try:
+            clear_session_cache.invoke({"session_id": session_id})
+        except Exception:
+            # best-effort; ignore failures when clearing the in-memory cache
+            pass
 
     return {
         "ok": True,

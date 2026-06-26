@@ -7,11 +7,12 @@ from typing import Any, Dict
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 from qdrant_helper import is_qdrant_available, search_session_chunks
+from pydantic import SecretStr
 
 load_dotenv()
 
 API_BASE = os.getenv("LOCAL_API_URL", "http://localhost:8000")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = SecretStr(os.getenv("GROQ_API_KEY") or "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 

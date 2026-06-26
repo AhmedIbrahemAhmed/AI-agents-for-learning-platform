@@ -17,12 +17,16 @@ import json
 import os
 import pyodbc
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Optional
+from typing import Callable, List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 
 # Try to import qdrant helpers if available (they're optional for this module)
+upsert_resource: Optional[Callable[..., Any]] = None
+upsert_session: Optional[Callable[..., Any]] = None
+upsert_topic: Optional[Callable[..., Any]] = None
+
 try:
     from qdrant_helper import upsert_resource, upsert_session, upsert_topic
     QDRANT_AVAILABLE = True
@@ -96,13 +100,15 @@ def get_or_create_resource(
             int(duration_minutes),
         )
         row = cursor.fetchone()
+        if not row:
+            raise Exception("Failed to insert resource")
         resource_id = int(row[0])
         conn.commit()
     finally:
         conn.close()
 
     # Upsert into Qdrant (idempotent, best-effort)
-    if QDRANT_AVAILABLE:
+    if QDRANT_AVAILABLE and upsert_resource is not None:
         try:
             upsert_resource(
                 resource_id=resource_id,
@@ -157,6 +163,9 @@ def get_or_create_topic(topic_name: str, create_if_missing: bool = False, topic_
                 4.0,
             )
             r = cursor.fetchone()
+            if not r:
+                conn.rollback()
+                raise Exception("Failed to insert topic")
             topic_id = int(r[0])
             domain_topic_id = None
             conn.commit()
@@ -164,7 +173,7 @@ def get_or_create_topic(topic_name: str, create_if_missing: bool = False, topic_
         conn.close()
 
     # Ensure the canonical topic is present in Qdrant (best-effort)
-    if QDRANT_AVAILABLE:
+    if QDRANT_AVAILABLE and upsert_topic is not None:
         try:
             upsert_topic(int(topic_id), topic_name, domain_topic_id=domain_topic_id, aliases=[])
         except Exception:
@@ -221,12 +230,15 @@ def create_topic(name: str, topic_type: str = "Concept") -> dict:
             4.0,
         )
         r = cursor.fetchone()
+        if not r:
+            conn.rollback()
+            raise Exception("Failed to insert topic")
         tid = int(r[0])
         conn.commit()
     finally:
         conn.close()
 
-    if QDRANT_AVAILABLE:
+    if QDRANT_AVAILABLE and upsert_topic is not None:
         try:
             upsert_topic(tid, name, domain_topic_id=None, aliases=[])
         except Exception:
@@ -289,6 +301,11 @@ def create_study_session(user_id: str, resource_id: Optional[int], summary: str,
     )
 
     row = cursor.fetchone()
+    if not row:
+        conn.rollback()
+        conn.close()
+        return {"error": "Failed to create study session"}
+
     conn.commit()
     conn.close()
     return {
@@ -317,7 +334,12 @@ def save_quiz_results(
         topic_id,
         round(quiz_score, 2),
     )
-    quiz_ev = cursor.fetchone()[0]
+    row = cursor.fetchone()
+    if not row:
+        conn.rollback()
+        conn.close()
+        return {"error": "Failed to insert quiz evidence"}
+    quiz_ev = row[0]
 
     cursor.execute(
         """
@@ -329,7 +351,12 @@ def save_quiz_results(
         topic_id,
         round(study_completion, 2),
     )
-    study_ev = cursor.fetchone()[0]
+    row = cursor.fetchone()
+    if not row:
+        conn.rollback()
+        conn.close()
+        return {"error": "Failed to insert study evidence"}
+    study_ev = row[0]
 
     conn.commit()
     conn.close()
@@ -387,7 +414,7 @@ def run_full_pipeline(
     domain = cursor.fetchone()
     conn.close()
 
-    if QDRANT_AVAILABLE:
+    if QDRANT_AVAILABLE and upsert_session is not None:
         try:
             upsert_session(
                 session_id=session_id,
@@ -805,7 +832,7 @@ def fetch_summary(user_id: str, max_skills: int = 3) -> str:
     skills = fetch_skills_from_view(user_id, limit=max_skills)
     exps = fetch_experiences(user_id, limit=5)
 
-    top_skills = ", ".join(s.get("name") for s in skills[:max_skills]) if skills else ""
+    top_skills = ", ".join(str(s.get("name", "")) for s in skills[:max_skills] if s.get("name")) if skills else ""
     recent = None
     if exps:
         for e in exps:

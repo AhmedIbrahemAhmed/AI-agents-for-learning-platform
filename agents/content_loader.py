@@ -1,3 +1,4 @@
+import importlib
 import re
 import unicodedata
 from typing import List, Dict, Any, Optional
@@ -19,7 +20,7 @@ def extract_video_id(url: str) -> Optional[str]:
 
 
 def fetch_metadata(url: str) -> dict:
-    ydl_opts: dict[str, Any] = {"quiet": True, "skip_download": True}
+    ydl_opts: Any = {"quiet": True, "skip_download": True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return {
@@ -66,12 +67,16 @@ def fetch_blog_content(url: str) -> dict:
         "meta", attrs={"property": "og:description"}
     )
     if desc_tag and desc_tag.get("content"):
-        description = desc_tag["content"].strip()
+        desc_content = desc_tag.get("content", "")
+        if isinstance(desc_content, list):
+            description = " ".join(desc_content).strip()
+        else:
+            description = str(desc_content).strip()
     # Prefer specialised extractors if available (trafilatura/readability), otherwise fall back to structured element collection.
     content_text = ""
     try:
         # Trafilatura does a good job for many sites if installed
-        import trafilatura
+        trafilatura = importlib.import_module("trafilatura")
 
         extracted = trafilatura.extract(html)
         if extracted:
@@ -79,7 +84,11 @@ def fetch_blog_content(url: str) -> dict:
     except Exception:
         # Not available or failed - try readability as a secondary option
         try:
-            from readability import Document
+            # Dynamically import readability to avoid static analysis import errors in some environments
+            readability = importlib.import_module("readability")
+            Document = getattr(readability, "Document", None)
+            if Document is None:
+                raise ImportError("readability.Document not found")
 
             doc = Document(html)
             summary_html = doc.summary()
@@ -92,7 +101,7 @@ def fetch_blog_content(url: str) -> dict:
 
     if not content_text:
         # Fallback: attempt to extract from common article/main containers first
-        article = soup.find("article") or soup.find(id=lambda v: v and "article" in v.lower()) or soup.find("main")
+        article = soup.find("article") or soup.find(id=lambda v: bool(v and "article" in v.lower())) or soup.find("main")
         container = article or soup
         elems = container.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "pre", "code"])
         parts = [e.get_text(separator=" ", strip=True) for e in elems if e.get_text(strip=True)]

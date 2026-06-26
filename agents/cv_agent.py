@@ -123,15 +123,29 @@ def render_experiences_latex(exps: List[Dict[str, Any]]) -> str:
     lines.append("\\end{itemize}")
     return "\n".join(lines)
 
-def fetch_summary(user_id: str, max_skills: int = 3) -> str:
-    return db_fetch_summary(user_id, max_skills)
+def fetch_summary(
+        user_id: str, 
+        skills: list[dict[str, Any]] | None = None, 
+        exps: list[dict[str, Any]] | None = None, 
+        projects: list[dict[str, Any]] | None = None
+    ) -> str:
+    """
+    Fetches the explicit profile summary. If empty, uses Groq LLM to generate 
+    a highly professional resume summary using already fetched profile facts.
+    """
+    # 1. First, check if they have a pre-written summary in the DB
+    explicit_summary = db_fetch_summary(user_id)
+    if explicit_summary and explicit_summary.strip():
+        return explicit_summary.strip()
 
-    # Gather structured facts for prompt
-    skills = fetch_skills_from_view(user_id, limit=max_skills)
-    exps = fetch_experiences(user_id, limit=5)
-    projects = fetch_projects(user_id, limit=3)
+    # 2. Fallback: If no explicit summary, use structured facts for the LLM
+    # Default to fetching if data wasn't passed down (preserves backwards compatibility)
+    skills = skills or fetch_skills_from_view(user_id, limit=3)
+    exps = exps or fetch_experiences(user_id, limit=5)
+    projects = projects or fetch_projects(user_id, limit=3)
 
-    top_skills = ", ".join(s.get("name") for s in skills[:max_skills]) if skills else ""
+    top_skills = ", ".join(str(s["name"]) for s in skills if s.get("name")) if skills else ""
+    
     recent = None
     if exps:
         for e in exps:
@@ -141,7 +155,6 @@ def fetch_summary(user_id: str, max_skills: int = 3) -> str:
         if not recent:
             recent = exps[0]
 
-    # Build a concise prompt for a professional summary (2-3 sentences)
     parts = []
     if recent and (recent.get("role") or recent.get("company")):
         rrole = recent.get("role") or ""
@@ -154,43 +167,46 @@ def fetch_summary(user_id: str, max_skills: int = 3) -> str:
     if parts:
         facts.append(" ".join(parts))
     if projects:
-        proj_names = ", ".join(p.get("title") for p in projects if p.get("title"))
+        proj_names = ", ".join(str(p["title"]) for p in projects if p.get("title"))
         if proj_names:
             facts.append(f"Notable projects: {proj_names}.")
 
     fact_block = " ".join(facts)
+    if not fact_block:
+        return "Ambitious professional seeking to leverage core skills in an impactful new role."
 
+    # Robust prompt engineering to prevent LLM chit-chat or Markdown formatting leaks
     prompt = (
-        "You are a professional resume writer. Using the facts below, write a concise professional summary (2-3 sentences) suitable for a CV. "
-        "Do not include headings or markdown. Keep it formal and focused on skills, recent role, and impact.\n\n"
-        f"Facts: {fact_block}\n\nIf there is little information, produce a short professional-sounding summary describing ambition and primary skills."
+        "You are an expert executive resume writer. Write a concise, compelling professional summary "
+        "comprising exactly 2-3 sentences for a CV based ONLY on the profile facts provided below.\n\n"
+        f"Profile Facts: {fact_block}\n\n"
+        "CRITICAL INSTRUCTIONS:\n"
+        "- Do NOT use markdown bolding, italics, or lists.\n"
+        "- Do NOT wrap the output in quotation marks.\n"
+        "- Output ONLY the direct summary text. Absolutely no conversational filler or preamble."
     )
 
-    # Try generating via LLM (Groq) then fallback to heuristic
     try:
-        llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=SecretStr(os.getenv("GROQ_API_KEY") or ""), temperature=0.1)
+        llm = ChatGroq(
+            model="llama-3.3-70b-versatile", 
+            api_key=SecretStr(os.getenv("GROQ_API_KEY") or ""), 
+            temperature=0.2  # Low temperature keeps it close to the provided facts
+        )
         resp = llm.invoke([HumanMessage(content=prompt)])
-        out = resp.content
-        if isinstance(out, list):
-            out = " ".join(str(o) for o in out)
-        text = str(out).strip()
-        # strip code fences if any
-        if text.startswith("```"):
-            text = text.split("```", 2)[-1].strip('`').strip()
+        text = str(resp.content).strip()
+        
+        # Clean up any lingering code fences or formatting oddities
+        if "```" in text:
+            text = text.split("```")[-2].strip()
+        text = text.replace('"', '').strip()
+        
         if text:
             return text
-    except Exception:
-        pass
+    except Exception as e:
+        # Silently catch API errors and log them, then move to algorithmic fallback
+        sys.stderr.write(f"LLM Summary generation failed: {e}\n")
 
-    # Algorithmic fallback
-    parts = []
-    if recent and (recent.get("role") or recent.get("company")):
-        rrole = recent.get("role") or ""
-        rcomp = recent.get("company") or ""
-        parts.append(f"{rrole} at {rcomp}".strip())
-    if top_skills:
-        parts.append(f"skilled in {top_skills}")
-
+    # 3. Safe Hardcoded Fallback if API is down
     if parts:
         return "Experienced " + ", ".join(parts) + "."
     return ""

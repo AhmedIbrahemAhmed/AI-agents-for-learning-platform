@@ -13,6 +13,8 @@ from database_tools import (
     fetch_topics_not_in,
     get_topic_name_by_id,
     fetch_topics_by_names,
+    fetch_prerequisites_for_target,
+    fetch_unmastered_topics,
 )
 from qdrant_helper import (
     search_similar_resources,
@@ -85,19 +87,20 @@ def recommend_topics_for_user(user_id: str, max_recs: int = 5, goal_texts: Optio
         # Start with graph-based related candidates from user's topics
         related = _fetch_related_candidates(conn, user_topic_ids)
 
-        candidates: Dict[int, Dict[str, Any]] = {}
+        candidates: Dict[str, Dict[str, Any]] = {}
         user_topic_map = {t["topic_id"]: t["name"] for t in user_topics}
 
         for r in related:
             tid = r["topic_id"]
+            str_key = str(tid)
             if tid in user_topic_ids:
                 continue
-            if tid not in candidates:
-                candidates[tid] = {"topic_id": tid, "name": r.get("name", ""), "reasons": []}
+            if str_key not in candidates:
+                candidates[str_key] = {"topic_id": tid, "name": r.get("name", ""), "reasons": []}
             src_name = user_topic_map.get(r.get("source_topic_id"), "your topic")
             rel_type = r.get("rel_type") or "related_to"
             expl = f"{rel_type.replace('_', ' ')} of '{src_name}'"
-            candidates[tid]["reasons"].append({"type": rel_type, "explanation": expl})
+            candidates[str_key]["reasons"].append({"type": rel_type, "explanation": expl})
 
         # Enrich candidates using goals and Qdrant if available
         goals_local: List[str] = goal_texts or []
@@ -173,7 +176,7 @@ def recommend_topics_for_user(user_id: str, max_recs: int = 5, goal_texts: Optio
         if enable_llm and pool_size < max(3, max_recs) and (goals_local):
             try:
                 # Build a prompt to produce candidate topic names relevant to the user's goals
-                studied_names = ", ".join([t.get("name") for t in user_topics if t.get("name")]) or ""
+                studied_names = ", ".join([str(t.get("name")) for t in user_topics if t.get("name") is not None]) or ""
                 joined_goals = "; ".join([g for g in goals_local if g])
                 prompt = (
                     f"You are a concise curriculum assistant. The user's studied topics: {studied_names}. "
@@ -251,9 +254,12 @@ def recommend_topics_for_user(user_id: str, max_recs: int = 5, goal_texts: Optio
             try:
                 rows = fetch_topics_not_in(user_topic_ids)
                 for r in rows:
-                    tid = int(r.get("topic_id"))
+                    raw_tid = r.get("topic_id")
+                    if raw_tid is None:
+                        continue  # Skip row if it has an invalid or missing ID
+                    tid = int(raw_tid)
                     tname = r.get("name")
-                    key = tid
+                    key = str(tid)
                     if str(key) in candidates or key in candidates:
                         continue
                     candidates[key] = {"topic_id": tid, "name": tname, "reasons": []}
@@ -277,8 +283,14 @@ def recommend_topics_for_user(user_id: str, max_recs: int = 5, goal_texts: Optio
 
             # re-score expanded candidate set
             scored = []
-            for tid, info in candidates.items():
-                metrics = _fetch_topic_mastery(conn, tid, user_id)
+            for key, info in candidates.items():
+                actual_tid = info.get("topic_id") 
+                
+                # If it's a valid integer ID, fetch mastery. If it's a name-only topic, use default metrics.
+                if actual_tid is not None:
+                    metrics = _fetch_topic_mastery(conn, int(actual_tid), user_id)
+                else:
+                    metrics = {"mastery": 0.0, "confidence": 0.0, "interest": 0.5}
                 first_reason = info.get("reasons", [None])[0] or {"type": "related_to", "explanation": "related to your interests"}
                 rel_type = first_reason.get("type", "related_to") if isinstance(first_reason, dict) else "related_to"
                 sql_score = _score_candidate(info, metrics, rel_type)
@@ -291,7 +303,7 @@ def recommend_topics_for_user(user_id: str, max_recs: int = 5, goal_texts: Optio
                 # blend: include goal alignment as an explicit boost
                 final = round(max(0.0, min(1.0, sql_score * 0.6 + q_score * 0.2 + goal_score * 0.2)), 3)
                 reason_texts = [r.get("explanation") if isinstance(r, dict) else str(r) for r in info.get("reasons", [])]
-                scored.append({"topic_id": tid, "name": info.get("name"), "score": final, "metrics": metrics, "reasons": reason_texts})
+                scored.append({"topic_id": actual_tid, "name": info.get("name"), "score": final, "metrics": metrics, "reasons": reason_texts})
 
             if not scored:
                 return {"recommendations": _weakness_topics(conn, user_id, max_recs)}
@@ -547,10 +559,18 @@ def generate_roadmap_for_user(
 
             # 3. Harvest Base Database Fallbacks
             try:
-                rows = fetch_unmastered_topics(user_id)
+                rows = fetch_unmastered_topics(user_id) or []
                 for r in rows:
-                    if is_goal_relevant(goal_text, r.get("name")):
-                        stage_candidate(int(r.get("topic_id")), r.get("name"), "Database structural base topic")
+                    raw_tid = r.get("topic_id")
+                    topic_name = r.get("name")
+                    
+                    # Ensure we have both a valid ID and a valid name before proceeding
+                    if raw_tid is None or topic_name is None:
+                        continue
+                        
+                    if is_goal_relevant(goal_text, str(topic_name)):
+                        # Safely cast raw_tid to int now that it's verified
+                        stage_candidate(int(raw_tid), str(topic_name), "Database structural base topic")
             except Exception:
                 pass
 
@@ -585,7 +605,7 @@ def generate_roadmap_for_user(
                     processed_candidate_names.pop(matched_candidate["name"].lower(), None)
                 else:
                     # Rule B: Agent generates a friendly, contextual backfill step to ensure completeness
-                    user_topic_names = [t.get("name") for t in user_topics if t.get("name")]
+                    user_topic_names = [str(t.get("name")) for t in user_topics if t.get("name") is not None]
                     context_snippet = ", ".join(user_topic_names[:3]) if user_topic_names else "your background"
                     goal_label = goal_text or "your goal"
                     friendly_expl = (

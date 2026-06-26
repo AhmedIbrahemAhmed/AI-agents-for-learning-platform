@@ -593,7 +593,7 @@ def session_complete(request: SessionCompleteRequest):
     if chunks:
         try:
             topics_list = (
-                [tr["topic_name"] for tr in request.topic_results]
+                [tr.topic_name for tr in request.topic_results]
                 if request.topic_results
                 else []
             )
@@ -728,8 +728,9 @@ def debug_session_chunks(req: DebugSessionChunksRequest):
 @api.post("/cv/generate", response_model=CVGenerateResponse)
 def cv_generate(req: CVGenerateRequest):
     try:
+        req_template_name = req.template_name or "simple_cv"
         tex_path, latex = generate_cv_latex(
-            req.user_id, template_name=req.template_name
+            req.user_id, template_name=req_template_name
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

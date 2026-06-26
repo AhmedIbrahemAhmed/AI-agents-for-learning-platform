@@ -43,7 +43,15 @@ def create(name: str):
         else:
             # Check if existing collection has wrong vector size
             info = client.get_collection(name)
-            existing_size = info.config.params.vectors.size
+            vectors_config = info.config.params.vectors
+
+            if isinstance(vectors_config, VectorParams):
+                existing_size = vectors_config.size
+            elif isinstance(vectors_config, dict) and vectors_config:
+                # Fallback if Qdrant returns named vectors as a dictionary
+                existing_size = next(iter(vectors_config.values())).size
+            else:
+                existing_size = 0
             if existing_size != VECTOR_SIZE:
                 print(
                     f"  [warn]   '{name}' exists with {existing_size}d vectors "
