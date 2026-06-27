@@ -541,9 +541,28 @@ def fetch_user_profile(user_id: str) -> Dict[str, str]:
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT UserName, Email FROM AspNetUsers WHERE Id = ?", user_id)
+        cur.execute("""
+            SELECT 
+                u.FirstName, 
+                u.LastName, 
+                u.Email, 
+                u.Mobile,
+                g.Name AS City,
+                co.Name AS Country
+            FROM AspNetUsers u
+            LEFT JOIN Countries co ON u.CountryId = co.Id
+            LEFT JOIN Governorates    g ON u.GovernorateId    = g.Id
+            WHERE u.Id = ?
+        """, user_id)
         row = cur.fetchone()
-        return {"name": row[0] or "", "email": row[1] or ""} if row else {"name": "", "email": ""}
+        if not row:
+            return {"name": "", "email": "", "city": "", "country": "", "location": "", "mobile": ""}
+        name = f"{row[0]} {row[1]}".strip() if row else ""
+        city    = row[4] or ""
+        country = row[5] or ""
+        location = f"{city}, {country}".strip(", ") if (city or country) else ""
+        mobile = row[3] or ""
+        return {"name": name, "email": row[2] or "", "city": city, "country": country, "location": location, "mobile": mobile} 
     finally:
         conn.close()
 

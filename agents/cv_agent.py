@@ -51,77 +51,221 @@ def fetch_experiences(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
     return db_fetch_experiences(user_id, limit)
 
 def render_skills_latex(skills: List[Dict[str, Any]]) -> str:
+    """Two-column tag-style grid instead of a flat bullet list."""
     if not skills:
         return "\\textit{No skills available to display.}"
-    lines = ["\\begin{itemize}"]
-    for s in skills:
-        pct = int(round(s.get("proficiency", 0.0) * 100))
-        lines.append(f"  \\item {escape_latex(s.get('name', ''))} -- {pct}\\%")
-    lines.append("\\end{itemize}")
+    
+    # Split into two columns
+    mid = (len(skills) + 1) // 2
+    left_col  = skills[:mid]
+    right_col = skills[mid:]
+
+    lines = [
+        "\\begin{tabular}{@{}p{0.47\\textwidth}p{0.47\\textwidth}@{}}",
+    ]
+    for i in range(mid):
+        l = left_col[i]
+        r = right_col[i] if i < len(right_col) else None
+
+        l_pct  = int(round(l.get("proficiency", 0.0) * 100))
+        l_name = escape_latex(l.get("name", ""))
+        left_cell = f"\\textbullet\\enskip\\textbf{{{l_name}}} \\textcolor{{muted}}{{({l_pct}\\%)}}"
+
+        if r:
+            r_pct  = int(round(r.get("proficiency", 0.0) * 100))
+            r_name = escape_latex(r.get("name", ""))
+            right_cell = f"\\textbullet\\enskip\\textbf{{{r_name}}} \\textcolor{{muted}}{{({r_pct}\\%)}}"
+        else:
+            right_cell = ""
+
+        sep = "\\\\" if i < mid - 1 else ""
+        lines.append(f"  {left_cell} & {right_cell} {sep}")
+
+    lines.append("\\end{tabular}")
     return "\n".join(lines)
 
 def render_projects_latex(projects: List[Dict[str, Any]]) -> str:
+    """
+    Each entry renders as:
+
+      Project Title (Role)                   Start – End
+      Description
+      URL (if present)
+    """
     if not projects:
         return "\\textit{No projects available.}"
-    lines = ["\\begin{itemize}"]
+
+    blocks = []
     for p in projects:
-        title = escape_latex(p.get("title", ""))
-        role = f" -- {escape_latex(p.get('role', ''))}" if p.get("role") else ""
-        desc = f": {escape_latex(p.get('description', ''))}" if p.get("description") else ""
-        
-        sstr, estr = _format_date(p.get("start_date")), _format_date(p.get("end_date"))
-        dates = f" ({sstr} -- {estr})" if (sstr or estr) else ""
-        url = f" (\\url{{{escape_latex(p.get('url', ''))}}})" if p.get("url") else ""
-        
-        lines.append(f"  \\item \\textbf{{{title}}}{role}{desc}{dates}{url}")
-    lines.append("\\end{itemize}")
-    return "\n".join(lines)
+        title   = escape_latex(p.get("title", ""))
+        role    = escape_latex(p.get("role", ""))
+        desc    = escape_latex(p.get("description", ""))
+        url     = p.get("url", "")
+        sstr    = _format_date(p.get("start_date"))
+        estr    = _format_date(p.get("end_date"))
+        dates   = f"{sstr} -- {estr}" if (sstr or estr) else ""
+
+        title_cell = f"\\textbf{{{title}}}"
+        if role:
+            title_cell += f" \\textcolor{{muted}}{{({role})}}"
+
+        block = (
+            f"\\noindent\\begin{{minipage}}{{\\textwidth}}\n"
+            f"  \\begin{{tabularx}}{{\\textwidth}}{{@{{}}X r@{{}}}}\n"
+            f"    {title_cell} & \\textcolor{{muted}}{{\\small {dates}}} \\\\\n"
+            f"  \\end{{tabularx}}\n"
+        )
+        if desc:
+            block += f"  \\vspace{{2pt}}\\small {desc}\\\\\n"
+        if url:
+            block += f"  \\vspace{{2pt}}\\textcolor{{accent}}{{\\small\\url{{{escape_latex(url)}}}}}\n"
+        block += "\\end{minipage}\\vspace{6pt}"
+        blocks.append(block)
+
+    return "\n\n".join(blocks)
+
 
 def render_certificates_latex(certs: List[Dict[str, Any]]) -> str:
+    """
+    Each entry renders as:
+
+      Certificate Name                       Issuer
+      Credential ID · URL
+    """
     if not certs:
         return "\\textit{No certifications available.}"
-    lines = ["\\begin{itemize}"]
+
+    blocks = []
     for c in certs:
-        name = escape_latex(c.get("name", ""))
-        issuer = f" -- {escape_latex(c.get('issuer', ''))}" if c.get("issuer") else ""
-        iden = f" (ID: {escape_latex(c.get('credential_id', ''))})" if c.get("credential_id") else ""
-        url = f" (\\url{{{escape_latex(c.get('url', ''))}}})" if c.get("url") else ""
-        
-        lines.append(f"  \\item \\textbf{{{name}}}{issuer}{iden}{url}")
-    lines.append("\\end{itemize}")
-    return "\n".join(lines)
+        name    = escape_latex(c.get("name", ""))
+        issuer  = escape_latex(c.get("issuer", ""))
+        cred_id = escape_latex(c.get("credential_id", ""))
+        url     = c.get("url", "")
+
+        block = (
+            f"\\noindent\\begin{{minipage}}{{\\textwidth}}\n"
+            f"  \\begin{{tabularx}}{{\\textwidth}}{{@{{}}X r@{{}}}}\n"
+            f"    \\textbf{{{name}}} & \\textcolor{{muted}}{{\\small {issuer}}} \\\\\n"
+            f"  \\end{{tabularx}}\n"
+        )
+        meta = []
+        if cred_id:
+            meta.append(f"ID: {cred_id}")
+        if url:
+            meta.append(f"\\textcolor{{accent}}{{\\url{{{escape_latex(url)}}}}}")
+        if meta:
+            block += f"  \\vspace{{2pt}}\\small\\textcolor{{muted}}{{{'  $\\cdot$  '.join(meta)}}}\n"
+        block += "\\end{minipage}\\vspace{6pt}"
+        blocks.append(block)
+
+    return "\n\n".join(blocks)
+
 
 def render_educations_latex(edus: List[Dict[str, Any]]) -> str:
+    """
+    Each entry renders as:
+
+      Degree in Field                        Start – End
+      Institution · Location
+        Description
+    """
     if not edus:
         return "\\textit{No education records available.}"
-    lines = ["\\begin{itemize}"]
+
+    blocks = []
     for e in edus:
-        inst = escape_latex(e.get("institution", ""))
-        deg = f", {escape_latex(e.get('degree', ''))}" if e.get("degree") else ""
-        field = f" ({escape_latex(e.get('field', ''))})" if e.get("field") else ""
-        dates = f" ({_format_date(e.get('start_date'))} -- {_format_date(e.get('end_date'))})" if (e.get('start_date') or e.get('end_date')) else ""
-        loc = f" -- {escape_latex(e.get('location', ''))}" if e.get("location") else ""
-        desc = f": {escape_latex(e.get('description', ''))}" if e.get("description") else ""
-        # FIX: Added extra backslash to prevent \t interpretation as a tab character
-        lines.append(f"  \\item \\textbf{{{inst}}}{deg}{field}{dates}{loc}{desc}")
-    lines.append("\\end{itemize}")
-    return "\n".join(lines)
+        inst    = escape_latex(e.get("institution", ""))
+        deg     = escape_latex(e.get("degree", ""))
+        field   = escape_latex(e.get("field", ""))
+        loc     = escape_latex(e.get("location", ""))
+        desc    = escape_latex(e.get("description", ""))
+        sstr    = _format_date(e.get("start_date"))
+        estr    = _format_date(e.get("end_date"))
+        dates   = f"{sstr} -- {estr}" if (sstr or estr) else ""
+
+        # Degree line
+        deg_line = ""
+        if deg and field:
+            deg_line = f"\\textbf{{{deg}}} \\textcolor{{muted}}{{in}} \\textbf{{{field}}}"
+        elif deg:
+            deg_line = f"\\textbf{{{deg}}}"
+        elif field:
+            deg_line = f"\\textbf{{{field}}}"
+        else:
+            deg_line = f"\\textbf{{{inst}}}"
+
+        # Institution + location line
+        inst_line = ""
+        if inst and loc:
+            inst_line = f"\\textcolor{{muted}}{{\\small {inst} $\\cdot$ {loc}}}"
+        elif inst:
+            inst_line = f"\\textcolor{{muted}}{{\\small {inst}}}"
+
+        block = (
+            f"\\noindent\\begin{{minipage}}{{\\textwidth}}\n"
+            f"  \\begin{{tabularx}}{{\\textwidth}}{{@{{}}X r@{{}}}}\n"
+            f"    {deg_line} & \\textcolor{{muted}}{{\\small {dates}}} \\\\\n"
+        )
+        if inst_line:
+            block += f"    {inst_line} & \\\\\n"
+        block += "  \\end{tabularx}\n"
+        if desc:
+            block += f"  \\vspace{{2pt}}\\small {desc}\n"
+        block += "\\end{minipage}\\vspace{6pt}"
+        blocks.append(block)
+
+    return "\n\n".join(blocks)
 
 def render_experiences_latex(exps: List[Dict[str, Any]]) -> str:
+    """
+    Each entry renders as:
+
+      Role, Company                          Start – End (or Present)
+      Location
+        Description text
+    """
     if not exps:
         return "\\textit{No work experience available.}"
-    lines = ["\\begin{itemize}"]
+
+    blocks = []
     for x in exps:
-        comp = escape_latex(x.get("company", ""))
-        role = f" -- {escape_latex(x.get('role', ''))}" if x.get("role") else ""
-        dates = f" ({_format_date(x.get('start_date'))} -- {_format_date(x.get('end_date'))})" if (x.get('start_date') or x.get('end_date')) else ""
-        loc = f" -- {escape_latex(x.get('location', ''))}" if x.get("location") else ""
-        current = " [Current]" if x.get("current") else ""
-        desc = f": {escape_latex(x.get('description', ''))}" if x.get("description") else ""
-        # FIX: Added extra backslash to prevent \t interpretation as a tab character
-        lines.append(f"  \\item \\textbf{{{comp}}}{role}{dates}{loc}{current}{desc}")
-    lines.append("\\end{itemize}")
-    return "\n".join(lines)
+        role    = escape_latex(x.get("role", ""))
+        comp    = escape_latex(x.get("company", ""))
+        loc     = escape_latex(x.get("location", ""))
+        desc    = escape_latex(x.get("description", ""))
+        sstr    = _format_date(x.get("start_date"))
+        estr    = "Present" if x.get("current") else _format_date(x.get("end_date"))
+        dates   = f"{sstr} -- {estr}" if (sstr or estr) else ""
+
+        # Line 1: Role — Company (right-aligned dates)
+        heading = []
+        if role and comp:
+            heading.append(f"\\textbf{{{role}}} \\textcolor{{muted}}{{at}} \\textbf{{{comp}}}")
+        elif role:
+            heading.append(f"\\textbf{{{role}}}")
+        elif comp:
+            heading.append(f"\\textbf{{{comp}}}")
+
+        line1 = (
+            f"\\noindent\\begin{{minipage}}{{\\textwidth}}\n"
+            f"  \\begin{{tabularx}}{{\\textwidth}}{{@{{}}X r@{{}}}}\n"
+            f"    {' '.join(heading)} & \\textcolor{{muted}}{{\\small {dates}}} \\\\\n"
+        )
+
+        # Line 2: Location (if present)
+        if loc:
+            line1 += f"    \\textcolor{{muted}}{{\\small {loc}}} & \\\\\n"
+
+        line1 += "  \\end{tabularx}\n"
+
+        # Line 3: Description indented below
+        if desc:
+            line1 += f"  \\vspace{{2pt}}\\small {desc}\n"
+
+        line1 += "\\end{minipage}\\vspace{6pt}"
+        blocks.append(line1)
+
+    return "\n\n".join(blocks)
 
 def fetch_summary(
         user_id: str, 
@@ -136,7 +280,7 @@ def fetch_summary(
     # 1. First, check if they have a pre-written summary in the DB
     explicit_summary = db_fetch_summary(user_id)
     if explicit_summary and explicit_summary.strip():
-        return explicit_summary.strip()
+        return escape_latex(explicit_summary.strip())
 
     # 2. Fallback: If no explicit summary, use structured facts for the LLM
     # Default to fetching if data wasn't passed down (preserves backwards compatibility)
@@ -197,18 +341,18 @@ def fetch_summary(
         
         # Clean up any lingering code fences or formatting oddities
         if "```" in text:
-            text = text.split("```")[-2].strip()
+            text = re.sub(r"```[a-z]*\n?", "", text).strip()
         text = text.replace('"', '').strip()
         
         if text:
-            return text
+            return escape_latex(text)
     except Exception as e:
         # Silently catch API errors and log them, then move to algorithmic fallback
         sys.stderr.write(f"LLM Summary generation failed: {e}\n")
 
     # 3. Safe Hardcoded Fallback if API is down
     if parts:
-        return "Experienced " + ", ".join(parts) + "."
+        return escape_latex("Experienced " + ", ".join(parts) + ".")
     return ""
 
 def generate_cv_latex(user_id: str, template_name: str = "simple_cv") -> Tuple[str, str]:
@@ -219,17 +363,26 @@ def generate_cv_latex(user_id: str, template_name: str = "simple_cv") -> Tuple[s
     with open(tpl_path, "r", encoding="utf-8") as fh:
         tpl = fh.read()
 
+    # Fix 1 & 3: fetch everything once and pass down
+    profile  = fetch_user_profile(user_id)
+    skills   = fetch_skills_from_view(user_id)
+    exps     = fetch_experiences(user_id)
+    projects = fetch_projects(user_id)
+
     replacements = {
-        "{{NAME}}": escape_latex(fetch_user_profile(user_id).get("name", "")),
-        "{{EMAIL}}": escape_latex(fetch_user_profile(user_id).get("email", "")),
-        "{{SKILLS}}": render_skills_latex(fetch_skills_from_view(user_id)),
-        "{{PROJECTS}}": render_projects_latex(fetch_projects(user_id)),
+        "{{NAME}}":         escape_latex(profile.get("name", "")),
+        "{{EMAIL}}":        escape_latex(profile.get("email", "")),
+        "{{MOBILE}}":       escape_latex(profile.get("mobile", "")),
+        "{{LOCATION}}":     escape_latex(profile.get("location", "")),
+        "{{SKILLS}}":       render_skills_latex(skills),
+        "{{PROJECTS}}":     render_projects_latex(projects),
         "{{CERTIFICATES}}": render_certificates_latex(fetch_certificates(user_id)),
-        "{{EDUCATIONS}}": render_educations_latex(fetch_educations(user_id)),
-        "{{EXPERIENCES}}": render_experiences_latex(fetch_experiences(user_id)),
-        "{{SUMMARY}}": escape_latex(fetch_summary(user_id)),
+        "{{EDUCATIONS}}":   render_educations_latex(fetch_educations(user_id)),
+        "{{EXPERIENCES}}":  render_experiences_latex(exps),
+        # Fix 2: no escape_latex here — fetch_summary returns plain prose, escape inside it
+        "{{SUMMARY}}":      fetch_summary(user_id, skills=skills, exps=exps, projects=projects),
     }
-    
+
     rendered = tpl
     for placeholder, val in replacements.items():
         rendered = rendered.replace(placeholder, val)
@@ -237,7 +390,7 @@ def generate_cv_latex(user_id: str, template_name: str = "simple_cv") -> Tuple[s
     out_dir = os.path.join("outputs", "cv")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"cv_{user_id}.tex")
-    
+
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(rendered)
 
