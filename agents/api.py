@@ -26,6 +26,7 @@ from llm_utils import (
     extract_topics_from_content,
     generate_quiz_multi,
     summarize_content_chunks,
+    normalize_topic,
 )
 from pydantic import BaseModel, Field
 from qdrant_helper import (
@@ -73,24 +74,6 @@ api.add_middleware(
 )
 # Backwards-compatible alias
 recommend_next_topics = recommend_topics_for_user
-
-# --- Shared Semantic Utilities ---
-
-
-def get_canonical_topic_name(topic_name: str) -> str:
-    """Resolves a topic name to its canonical version via Qdrant semantic matching."""
-    if not is_qdrant_available():
-        return topic_name.strip()
-
-    threshold = float(os.getenv("TOPIC_MATCH_THRESHOLD", "0.75"))
-    try:
-        hits = search_similar_topics(topic_name, limit=1)
-        if hits and hits[0].get("score", 0) >= threshold:
-            return hits[0].get("name") or topic_name
-    except Exception as e:
-        logger.error("Failed semantic topic search for %s: %s", topic_name, e)
-
-    return topic_name
 
 
 # --- Pydantic Schemas ---
@@ -230,24 +213,33 @@ def content_prepare(request: ContentPrepareRequest):
         extracted_topics = [result["title"]]
 
     # Canonicalize via deduplication function
-    topics: list[str] = []
-    for t in extracted_topics:
-        canonical_name = get_canonical_topic_name(t)
-        if canonical_name and canonical_name not in topics:
-            topics.append(canonical_name)
-
     # Sync topics to database
-    for t in topics:
+    SIMILARITY_THRESHOLD = float(os.getenv("TOPIC_MATCH_THRESHOLD", "0.70"))
+    resolved_topics: list[str] = []
+    for t in extracted_topics:  # ← feed extracted_topics directly, skip get_canonical_topic_name
+        canonical = t
+
+        if is_qdrant_available():
+            try:
+                hits = search_similar_topics(normalize_topic(t), limit=1)
+                if hits and hits[0].get("score", 0) >= SIMILARITY_THRESHOLD:
+                    canonical = hits[0]["name"]
+            except Exception as e:
+                logger.warning("Topic similarity search failed for '%s': %s", t, e)
+
+        if canonical not in resolved_topics:
+            resolved_topics.append(canonical)
+
         try:
-            get_or_create_topic.invoke(
-                {
-                    "topic_name": t,
-                    "create_if_missing": True,
-                    "topic_type": "Concept",
-                }
-            )
-        except Exception:
-            pass
+            get_or_create_topic.invoke({
+                "topic_name": canonical,
+                "create_if_missing": True,
+                "topic_type": "Concept",
+            })
+        except Exception as e:
+            logger.warning("get_or_create_topic failed for '%s': %s", canonical, e)
+    # Use resolved_topics downstream instead of raw topics
+    topics = resolved_topics
 
     session_id = None
     session_summary = None
@@ -460,6 +452,7 @@ def session_complete(request: SessionCompleteRequest):
 
     session_id = request.session_id
     topic_updates: List[Dict[str, Any]] = []
+    SIMILARITY_THRESHOLD = float(os.getenv("TOPIC_MATCH_THRESHOLD", "0.70"))
 
     duration_minutes = request.duration_minutes
     if duration_minutes is not None and request.user_id:
@@ -504,21 +497,43 @@ def session_complete(request: SessionCompleteRequest):
     for item in request.topic_results:
         tid = item.topic_id
         dom_id = item.domain_topic_id
+        # Track the canonical name separately so item.topic_name is preserved
+        # in the response for the caller's reference
+        canonical_name = item.topic_name
 
-        if not tid and is_qdrant_available():
-            threshold = float(os.getenv("TOPIC_MATCH_THRESHOLD", "0.75"))
+        # ── Step 1: fuzzy resolve topic name + ID via Qdrant ─────────
+        if is_qdrant_available():
             try:
-                hits = search_similar_topics(item.topic_name, limit=1)
-                if hits and hits[0].get("score", 0) >= threshold:
-                    tid = hits[0].get("topic_id")
-                    dom_id = hits[0].get("domain_topic_id")
-            except Exception:
-                tid = None
+                hits = search_similar_topics(normalize_topic(item.topic_name), limit=1)
 
+                if hits and hits[0].get("score", 0) >= SIMILARITY_THRESHOLD:
+                    match = hits[0]
+                    canonical_name = match["name"]
+                    # Only take the matched IDs if the hit is DB-backed
+                    if not tid and match.get("topic_id"):
+                        tid = match["topic_id"]
+                        dom_id = match.get("domain_topic_id")
+                        logger.debug(
+                            "Topic '%s' resolved to existing '%s' (id=%s, score=%.2f)",
+                            item.topic_name,
+                            canonical_name,
+                            tid,
+                            match["score"],
+                        )
+            except Exception as e:
+                logger.warning(
+                    "Topic similarity search failed for '%s': %s",
+                    item.topic_name,
+                    e,
+                )
+
+        # ── Step 2: create topic in DB if still unresolved ───────────
         if not tid:
             topic_result = get_or_create_topic.invoke(
                 {
-                    "topic_name": item.topic_name,
+                    # Use canonical_name so even non-Qdrant path benefits
+                    # from any name normalisation done above
+                    "topic_name": canonical_name,
                     "create_if_missing": True,
                     "topic_type": "Concept",
                 }
@@ -529,7 +544,13 @@ def session_complete(request: SessionCompleteRequest):
                 )
             tid = topic_result.get("topic_id")
             dom_id = topic_result.get("domain_topic_id")
+            logger.debug(
+                "Topic '%s' created/fetched from DB (id=%s)",
+                canonical_name,
+                tid,
+            )
 
+        # ── Step 3: save quiz evidence ────────────────────────────────
         evidence = save_quiz_results.invoke(
             {
                 "session_id": session_id,
@@ -539,13 +560,15 @@ def session_complete(request: SessionCompleteRequest):
             }
         )
 
+        # ── Step 4: run mastery pipeline ──────────────────────────────
         pipeline_payload = run_full_pipeline.invoke(
             {
                 "user_id": request.user_id,
                 "session_id": session_id,
                 "topic_id": tid,
                 "domain_topic_id": dom_id,
-                "topic_name": item.topic_name,
+                # Pass canonical_name so pipeline uses the deduplicated name
+                "topic_name": canonical_name,
                 "session_summary": request.session_summary,
                 "quiz_score": item.quiz_score,
             }
@@ -558,7 +581,10 @@ def session_complete(request: SessionCompleteRequest):
 
         topic_updates.append(
             {
+                # Return both so the caller can see what was requested
+                # and what it resolved to
                 "topic_name": item.topic_name,
+                "canonical_name": canonical_name,
                 "topic_id": tid,
                 "domain_topic_id": dom_id,
                 "quiz_score": item.quiz_score,
@@ -592,11 +618,8 @@ def session_complete(request: SessionCompleteRequest):
 
     if chunks:
         try:
-            topics_list = (
-                [tr.topic_name for tr in request.topic_results]
-                if request.topic_results
-                else []
-            )
+            # Use canonical names in the chunk embeddings so Qdrant stays consistent
+            topics_list = [u["canonical_name"] for u in topic_updates]
             upsert_session_chunks(
                 session_id=session_id,
                 user_id=request.user_id,
@@ -606,13 +629,16 @@ def session_complete(request: SessionCompleteRequest):
         except Exception as e:
             logger.warning("upsert_session_chunks failed: %s", e)
 
-    # Persist ephemeral in-memory chat turns (if any) into Qdrant `SessionChatHistory`.
+    # ── Persist ephemeral chat turns into Qdrant SessionChatHistory ──
     try:
         cached = get_session_cached_turns.invoke({"session_id": session_id, "max_items": None})
-        # tool returns a list of turn dicts; ensure it's a list
         if isinstance(cached, list) and cached:
             try:
-                upsert_session_chat_history(session_id=session_id, user_id=request.user_id, chat_turns=cached)
+                upsert_session_chat_history(
+                    session_id=session_id,
+                    user_id=request.user_id,
+                    chat_turns=cached,
+                )
             except Exception as e:
                 logger.warning("upsert_session_chat_history failed: %s", e)
             try:
@@ -620,11 +646,12 @@ def session_complete(request: SessionCompleteRequest):
             except Exception:
                 logger.debug("clear_session_cache failed for session %s", session_id)
     except Exception:
-        # non-fatal: continue even if retrieving cached turns fails
-        logger.debug("get_session_cached_turns failed or returned no cached turns for session %s", session_id)
+        logger.debug(
+            "get_session_cached_turns failed or returned no cached turns for session %s",
+            session_id,
+        )
 
     return {"session_id": session_id, "topic_updates": topic_updates}
-
 
 @api.post("/recommend/topics", response_model=RecommendResponse)
 def recommend_topics(request: RecommendRequest):

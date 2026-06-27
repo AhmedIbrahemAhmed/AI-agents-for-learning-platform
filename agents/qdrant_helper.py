@@ -7,6 +7,11 @@ from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 import uuid
+
+from llm_utils import (
+    normalize_topic,
+)
+
 _model = None
 _qdrant = None
 
@@ -418,7 +423,7 @@ def upsert_topic(topic_id: int, name: str, domain_topic_id: Optional[int] = None
     """
     text = name
     if aliases:
-        text = f"{name}. Aliases: {', '.join(aliases)}"
+        text = f"{text}. Aliases: {', '.join(normalize_topic(a) for a in aliases)}"
     vector = embed(text)
     client = _get_qdrant_client()
     payload = {"topic_id": int(topic_id), "name": name}

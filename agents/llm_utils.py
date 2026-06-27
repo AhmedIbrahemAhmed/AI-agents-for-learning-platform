@@ -1,7 +1,7 @@
 import json
 import os
 from dotenv import load_dotenv
-
+import unicodedata
 # Ensure environment variables from project .env are loaded when this module imports
 ROOT = os.path.dirname(os.path.dirname(__file__))
 DOTENV_PATH = os.path.join(ROOT, ".env")
@@ -15,6 +15,18 @@ from langchain_core.tools import tool
 from pydantic import SecretStr
 
 from content_loader import split_text_into_chunks
+
+
+def normalize_topic(name: str) -> str:
+    """
+    Normalize a topic name for comparison:
+    strips hyphens, extra spaces, lowercases.
+    'Big-O Notation' and 'Big O Notation' both become 'big o notation'
+    """
+    name = name.strip()
+    name = name.replace("-", " ").replace("_", " ")
+    name = re.sub(r"\s+", " ", name)
+    return name.lower()
 
 
 def safe_json_load(raw: Any) -> Dict[str, Any]:
@@ -67,18 +79,23 @@ def extract_topics_from_content(title: str, content: Union[str, List[str]]) -> L
     topic_candidates: List[List[str]] = []
     for index, chunk in enumerate(content_chunks, start=1):
         prompt = f"""You are an educational curriculum supervisor.
-Analyze this title and content text to extract the core technical or academic concepts taught.
+        Extract ONLY the core concepts that are explicitly and substantially taught in this content.
+        Do NOT include:
+        - Broad umbrella terms that just describe the video category (e.g. "Algorithm Analysis", "Computational Complexity")
+        - Concepts that are merely mentioned in passing
+        - Synonyms or restatements of already listed concepts
 
-Title: {title}
-Content Excerpt {index}/{len(content_chunks)}:
-{chunk[:8000]}
+        Aim for 2-4 focused topics per chunk maximum.
 
-Return ONLY a valid JSON object matching the format below. Do not include markdown formatting, backticks, or preamble text.
+        Title: {title}
+        Content Excerpt {index}/{len(content_chunks)}:
+        {chunk[:8000]}
 
-Format:
-{{
-    "topics": ["Concept 1", "Concept 2", "Concept 3"]
-}}"""
+        Return ONLY a valid JSON object. No markdown, no preamble.
+        Format:
+        {{
+            "topics": ["Concept 1", "Concept 2"]
+        }}"""
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
             data = safe_json_load(response.content)
@@ -93,8 +110,73 @@ Format:
             if cleaned and cleaned not in topics:
                 topics.append(cleaned)
 
+    if not topics:
+        return [title]
+
+    # ── NEW: merge semantically similar topics via LLM ──────────────
+    if len(topics) > 1:
+        topics = _merge_similar_topics(topics, llm)
+
     return topics if topics else [title]
 
+
+def _merge_similar_topics(topics: List[str], llm) -> List[str]:
+    """
+    Ask the LLM to collapse ONLY near-identical or trivially redundant topics.
+    Distinct but related topics (e.g. Time Complexity vs Space Complexity) must stay separate.
+    """
+    # ── Pre-pass: collapse trivially identical topics (punctuation/case) ──
+    seen_normalized: Dict[str, str] = {}
+    pre_deduped: List[str] = []
+    for t in topics:
+        key = normalize_topic(t)
+        if key not in seen_normalized:
+            seen_normalized[key] = t
+            pre_deduped.append(t)
+        # else: drop the duplicate, keep the first occurrence
+
+    if len(pre_deduped) <= 1:
+        return pre_deduped
+
+    prompt = f"""You are a curriculum editor. Below is a list of topics extracted from educational content.
+ONLY merge topics that are near-identical or trivially redundant, for example:
+- "Big O" and "Big-O Notation" → merge into "Big-O Notation"
+- "Time Complexity" and "Time Complexity Analysis" → merge into "Time Complexity"
+
+DO NOT merge topics that are related but distinct, for example:
+- "Time Complexity" and "Space Complexity" → keep both
+- "Computational Complexity" and "Worst-Case Scenario" → keep both
+- "Binary Search" and "Sorting Algorithms" → keep both
+
+When in doubt, keep topics separate. Prefer more topics over fewer.
+
+Topics:
+{json.dumps(pre_deduped, ensure_ascii=False)}
+
+Return ONLY valid JSON. No markdown, no explanation.
+Format:
+{{
+    "topics": ["Canonical Topic 1", "Canonical Topic 2"]
+}}"""
+
+    try:
+        strict_llm = ChatGroq(
+            model="llama-3.3-70b-versatile",
+            api_key=SecretStr(os.getenv("GROQ_API_KEY") or ""),
+            temperature=0.0,
+        )
+        response = strict_llm.invoke([HumanMessage(content=prompt)])
+        data = safe_json_load(response.content)
+        merged = [t.strip() for t in data.get("topics", []) if t.strip()]
+        # Safety guard: if LLM collapsed too aggressively (less than half original),
+        # fall back to pre-deduped list
+        if merged and len(merged) >= max(1, len(pre_deduped) // 2 + 1):
+            return merged
+        return pre_deduped
+    except Exception as e:
+        print(f"⚠️ Topic merge step failed: {e}")
+        return pre_deduped  # fall back to pre-deduped, not original
+    
 
 def infer_domain_from_topics(topics: List[str]) -> Optional[str]:
     """Given a list of extracted topics, ask the LLM to pick the most likely domain
