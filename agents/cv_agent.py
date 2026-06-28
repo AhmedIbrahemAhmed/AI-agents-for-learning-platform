@@ -363,23 +363,42 @@ def generate_cv_latex(user_id: str, template_name: str = "simple_cv") -> Tuple[s
     with open(tpl_path, "r", encoding="utf-8") as fh:
         tpl = fh.read()
 
-    # Fix 1 & 3: fetch everything once and pass down
     profile  = fetch_user_profile(user_id)
     skills   = fetch_skills_from_view(user_id)
     exps     = fetch_experiences(user_id)
     projects = fetch_projects(user_id)
+
+    # Build social links conditionally — avoids orphan bullets when fields are empty
+    linkedin = profile.get("linkedin", "")
+    github   = profile.get("github", "")
+    social_parts = []
+    if linkedin:
+        social_parts.append(
+            f"\\href{{https://linkedin.com/in/{escape_latex(linkedin)}}}"
+            f"{{\\textcolor{{accent}}{{linkedin.com/in/{escape_latex(linkedin)}}}}}"
+        )
+    if github:
+        social_parts.append(
+            f"\\href{{https://github.com/{escape_latex(github)}}}"
+            f"{{\\textcolor{{accent}}{{github.com/{escape_latex(github)}}}}}"
+        )
+    social_links = (
+        "\\textcolor{muted}{\\small "
+        + "\\quad\\textbullet\\quad".join(social_parts)
+        + "}"
+    ) if social_parts else ""
 
     replacements = {
         "{{NAME}}":         escape_latex(profile.get("name", "")),
         "{{EMAIL}}":        escape_latex(profile.get("email", "")),
         "{{MOBILE}}":       escape_latex(profile.get("mobile", "")),
         "{{LOCATION}}":     escape_latex(profile.get("location", "")),
+        "{{SOCIAL_LINKS}}": social_links,  # no escape_latex — already valid LaTeX
         "{{SKILLS}}":       render_skills_latex(skills),
         "{{PROJECTS}}":     render_projects_latex(projects),
         "{{CERTIFICATES}}": render_certificates_latex(fetch_certificates(user_id)),
         "{{EDUCATIONS}}":   render_educations_latex(fetch_educations(user_id)),
         "{{EXPERIENCES}}":  render_experiences_latex(exps),
-        # Fix 2: no escape_latex here — fetch_summary returns plain prose, escape inside it
         "{{SUMMARY}}":      fetch_summary(user_id, skills=skills, exps=exps, projects=projects),
     }
 

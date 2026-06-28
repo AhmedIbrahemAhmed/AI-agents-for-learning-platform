@@ -547,22 +547,24 @@ def fetch_user_profile(user_id: str) -> Dict[str, str]:
                 u.LastName, 
                 u.Email, 
                 u.Mobile,
-                g.Name AS City,
-                co.Name AS Country
+                u.State AS City,
+                u.Country AS Country,
+                u.LinkedIn AS LinkedInProfile,
+                u.GitHub AS GitHubProfile
             FROM AspNetUsers u
-            LEFT JOIN Countries co ON u.CountryId = co.Id
-            LEFT JOIN Governorates    g ON u.GovernorateId    = g.Id
             WHERE u.Id = ?
         """, user_id)
         row = cur.fetchone()
         if not row:
-            return {"name": "", "email": "", "city": "", "country": "", "location": "", "mobile": ""}
+            return {"name": "", "email": "", "city": "", "country": "", "location": "", "mobile": "", "linkedin": "", "github": ""}
         name = f"{row[0]} {row[1]}".strip() if row else ""
         city    = row[4] or ""
         country = row[5] or ""
         location = f"{city}, {country}".strip(", ") if (city or country) else ""
-        mobile = row[3] or ""
-        return {"name": name, "email": row[2] or "", "city": city, "country": country, "location": location, "mobile": mobile} 
+        mobile = "+20 " + row[3] or ""
+        linkedin = row[6] or ""
+        github = row[7] or ""
+        return {"name": name, "email": row[2] or "", "city": city, "country": country, "location": location, "mobile": mobile, "linkedin": linkedin, "github": github}
     finally:
         conn.close()
 
