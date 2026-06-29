@@ -11,13 +11,22 @@ To recreate existing collections with the new 768d size, run:
 """
 
 import sys
+import os
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PayloadSchemaType
+from dotenv import load_dotenv
+
+load_dotenv()
+_QDRANT_URL = os.getenv("QDRANT_URL")
+_QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+_QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+_QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 # ── Connection ───────────────────────────────────────────────
-client = QdrantClient(host="localhost", port=6333)
-# For Qdrant Cloud:
-# client = QdrantClient(url="https://<cluster>.qdrant.io", api_key="<key>")
+if _QDRANT_URL:
+    client = QdrantClient(url=_QDRANT_URL, api_key=_QDRANT_API_KEY)
+else:
+    client = QdrantClient(host=_QDRANT_HOST, port=_QDRANT_PORT)
 
 VECTOR_SIZE = 768           # Gemini text-embedding-004
 DISTANCE    = Distance.COSINE
