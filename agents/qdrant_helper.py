@@ -7,10 +7,12 @@ from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 import uuid
-
+from dotenv import load_dotenv
 from llm_utils import (
     normalize_topic,
 )
+
+load_dotenv()
 
 _model = None
 _qdrant = None
