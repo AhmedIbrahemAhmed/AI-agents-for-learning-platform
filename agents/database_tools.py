@@ -56,7 +56,7 @@ if DB_TRUSTED:
 else:
     auth_part = f"UID={DB_UID};PWD={DB_PWD};"
 
-DB_CONN_STR = f"DRIVER={{{DB_DRIVER}}};SERVER={server_field};DATABASE={DB_NAME};{auth_part}"
+DB_CONN_STR = f"DRIVER={{{DB_DRIVER}}};SERVER={server_field};DATABASE={DB_NAME};{auth_part}Encrypt=yes;TrustServerCertificate=yes;MultipleActiveResultSets=yes;"
 
 
 def get_conn():
