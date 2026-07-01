@@ -41,9 +41,26 @@ def fetch_metadata(url: str) -> dict:
 def fetch_transcript(video_id: str) -> str:
     try:
         api = YouTubeTranscriptApi()
-        transcript = api.fetch(video_id)
 
-        text_parts: List[str] = []
+        # Try common English variants first
+        try:
+            transcript = api.fetch(
+                video_id,
+                languages=[
+                    "en",
+                    "en-IN",
+                    "en-US",
+                    "en-GB",
+                    "en-CA",
+                    "en-AU",
+                ],
+            )
+        except Exception:
+            # Fall back to any available transcript
+            transcript = api.fetch(video_id)
+
+        text_parts = []
+
         for item in transcript:
             if hasattr(item, "text"):
                 text_parts.append(item.text)
