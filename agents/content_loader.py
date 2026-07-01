@@ -1,12 +1,15 @@
 import importlib
+import os
 import re
 import unicodedata
 from typing import List, Dict, Any, Optional
-
+from pydantic import SecretStr
 import httpx
 import io
 from bs4 import BeautifulSoup
+from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
+from langchain_groq import ChatGroq
 from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 
@@ -232,6 +235,52 @@ def sanitize_for_json(s: str) -> str:
     return s
 
 
+def _should_infer_pdf_title(title: str, url: str) -> bool:
+    if not title:
+        return True
+    lowered = title.strip().lower()
+    if "drive.google.com" in url:
+        return True
+    if lowered.startswith(("download", "view", "open", "uc?export", "file?", "id=")):
+        return True
+    if lowered.endswith(".pdf"):
+        return True
+    if "drive.google.com" in url:
+        return True
+    return False
+
+
+def infer_pdf_title_from_text(content_text: str, url: str = "", max_input_chars: int = 5000) -> str:
+    if not content_text or not isinstance(content_text, str):
+        return ""
+
+    prompt = f"""You are an assistant that reads extracted PDF text and suggests the best concise title for the document.
+Return only a short, human-readable title with no markdown, no bullet points, and no extra explanation.
+If the text appears to be a course, manual, research paper, or technical guide, derive a natural title from its content.
+
+PDF excerpt:
+{content_text[:max_input_chars]}"""
+
+    try:
+        llm = ChatGroq(
+            model="llama-3.3-70b-versatile",
+            api_key=SecretStr(os.getenv("GROQ_API_KEY", "")),
+            temperature=0.0,
+        )
+        response = llm.invoke([HumanMessage(content=prompt)])
+        title = response.content
+        if isinstance(title, list):
+            title = " ".join(str(item) for item in title)
+        title = str(title).strip().strip('"').strip("'")
+        title = title.replace("\n", " ").strip()
+        if title:
+            return title
+    except Exception:
+        pass
+
+    return ""
+
+
 @tool
 def fetch_source_content(source_type: str, url: str) -> dict:
     """Fetch content for a source (YouTube or blog) and return metadata and chunks."""
@@ -262,8 +311,11 @@ def fetch_source_content(source_type: str, url: str) -> dict:
                 return {"error": f"PDF extractor library unavailable: {e}"}
 
             pages = []
+            pdf_metadata_title = ""
             try:
                 reader = PdfReader(io.BytesIO(content))
+                if getattr(reader, "metadata", None):
+                    pdf_metadata_title = getattr(reader.metadata, "title", "") or ""
                 for idx, p in enumerate(reader.pages):
                     try:
                         # Extract text and run structural sanitation immediately per page
@@ -280,6 +332,8 @@ def fetch_source_content(source_type: str, url: str) -> dict:
                 # Lenient fallback attempt
                 try:
                     reader = PdfReader(io.BytesIO(content), strict=False)
+                    if getattr(reader, "metadata", None):
+                        pdf_metadata_title = getattr(reader.metadata, "title", "") or pdf_metadata_title
                     for p in reader.pages:
                         try:
                             page_text = p.extract_text() or ""
@@ -304,7 +358,11 @@ def fetch_source_content(source_type: str, url: str) -> dict:
 
             # Split text safely using your updated newline/sentence chunker
             chunks = split_text_into_chunks(sanitized_text, max_chars=9000)
-            title = url.split("/")[-1]
+            title = pdf_metadata_title.strip() or url.split("/")[-1]
+            if _should_infer_pdf_title(title, url):
+                inferred_title = infer_pdf_title_from_text(sanitized_text, url=url)
+                if inferred_title:
+                    title = inferred_title
             
             return {
                 "source_type": "pdf",
