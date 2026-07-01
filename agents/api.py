@@ -149,10 +149,11 @@ class RecommendRequest(BaseModel):
     user_id: str  # AspNetUsers.Id (string GUID)
     max_recs: int = 5
     goals: Optional[List[str]] = None
+    llm_from_studied_only: bool = False
 
 
 class RecommendItem(BaseModel):
-    topic_id: int
+    topic_id: Optional[int] = None
     name: Optional[str] = None
     score: float
     metrics: Optional[Dict[str, Any]] = None
@@ -668,9 +669,15 @@ def session_complete(request: SessionCompleteRequest):
 
 @api.post("/recommend/topics", response_model=RecommendResponse)
 def recommend_topics(request: RecommendRequest):
-    payload = {"user_id": request.user_id, "max_recs": request.max_recs}
+    payload = {
+        "user_id": request.user_id, 
+        "max_recs": request.max_recs,
+        "enable_llm": True,  # Always enable LLM for topic recommendations
+    }
     if request.goals:
         payload["goal_texts"] = request.goals
+
+    # Invoke the tool cleanly
     result = recommend_topics_for_user.invoke(payload)
     return {"recommendations": result.get("recommendations", [])}
 
@@ -742,11 +749,21 @@ def assistant_session_query(request: SessionChatRequest):
 
 @api.post("/recommend/roadmap")
 def recommend_roadmap(request: RoadmapRequest):
-    payload = {"user_id": request.user_id, "steps": request.steps}
+    payload = {
+        "user_id": request.user_id, 
+        "steps": request.steps
+    }
     if request.goal_text:
         payload["goal_text"] = request.goal_text
+        
+    # Invoke the updated, fallback-safe roadmap generator
     result = generate_roadmap_for_user.invoke(payload)
-    return {"roadmap": result.get("roadmap", [])}
+    
+    # Return both the steps and the execution status message
+    return {
+        "roadmap": result.get("roadmap", []),
+        "message": result.get("message", "Roadmap processing finished.")
+    }
 
 
 @api.post("/debug/session_chunks")
