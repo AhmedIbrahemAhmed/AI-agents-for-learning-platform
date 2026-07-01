@@ -236,11 +236,12 @@ def sanitize_for_json(s: str) -> str:
 def fetch_source_content(source_type: str, url: str) -> dict:
     """Fetch content for a source (YouTube or blog) and return metadata and chunks."""
     source_type = source_type.lower()
+    if "drive.google.com" in url:
+        url = normalize_pdf_url(url)
+        source_type = "pdf"  # Override to PDF if it's a Google Drive link
     # PDF support: fetch binary and extract text
     if source_type == "pdf" or (url and url.lower().endswith(".pdf")):
         try:
-            if "drive.google.com" in url:
-                url = normalize_pdf_url(url)
             resp = httpx.get(url, timeout=30.0, follow_redirects=True)
             resp.raise_for_status()
 
@@ -354,8 +355,6 @@ def fetch_source_content(source_type: str, url: str) -> dict:
         }
 
     if source_type in {"blog", "article", "webpage"}:
-        if "drive.google.com" in url:
-            url = normalize_pdf_url(url)
         result = fetch_blog_content(url)
         result["source_type"] = "blog"
         result["source_url"] = url
