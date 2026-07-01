@@ -1,21 +1,23 @@
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 
-from content_loader import fetch_source_content
+from content_loader import (
+    fetch_source_content,
+    fetch_metadata,
+    )
 from cv_agent import generate_cv_latex
 from database_tools import (
     create_study_session,
+    update_study_session_ended_at,
     deduct_user_session_minutes,
-    deduce_video_duration_from_user_session_minutes,
     get_or_create_resource,
     get_or_create_topic,
     run_full_pipeline,
     save_quiz_results,
-    get_session_for_user_resource,
     get_resource_id_for_session,
     get_resource_by_id,
 )
@@ -196,6 +198,21 @@ class CVGenerateResponse(BaseModel):
 
 
 # --- Endpoints ---
+
+
+@api.get("/content/duration")
+def get_content_duration(source_type: str, url: str):
+    if source_type != "youtube":
+        raise HTTPException(status_code=400, detail="Invalid source type")
+    result = fetch_metadata(url)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return {
+        "title": result.get("title"),
+        "duration_minutes": round(result.get("duration_s", 0) / 60, 1),
+        "channel": result.get("channel"),
+        "description": result.get("description"),
+    }
 
 
 @api.post("/content/prepare", response_model=ContentPrepareResponse)
@@ -451,11 +468,25 @@ def session_complete(request: SessionCompleteRequest):
             )
 
     session_id = request.session_id
+    ended_at = datetime.now(timezone.utc)
+    try:
+        update_study_session_ended_at.invoke(
+            {"session_id": session_id, "ended_at": ended_at}
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to update StudySessions.EndedAt for session %s: %s",
+            session_id,
+            e,
+        )
     topic_updates: List[Dict[str, Any]] = []
     SIMILARITY_THRESHOLD = float(os.getenv("TOPIC_MATCH_THRESHOLD", "0.70"))
 
     duration_minutes = request.duration_minutes
-    if duration_minutes is not None and request.user_id:
+    if duration_minutes is None:
+        duration_minutes = 0
+
+    if request.user_id:
         try:
             remaining_minutes = deduct_user_session_minutes.invoke(
                 {
@@ -472,24 +503,6 @@ def session_complete(request: SessionCompleteRequest):
         except Exception as e:
             logger.warning(
                 "Failed to deduct user session minutes for user %s: %s",
-                request.user_id,
-                e,
-            )
-    elif duration_minutes is None and request.user_id:
-        try:
-            deduced_duration = deduce_video_duration_from_user_session_minutes.invoke(
-                {"user_id": request.user_id}
-            )
-            if deduced_duration is not None:
-                duration_minutes = float(deduced_duration)
-                logger.debug(
-                    "Deduced duration_minutes=%s from AspNetUsers.SessionMinutes for user %s",
-                    deduced_duration,
-                    request.user_id,
-                )
-        except Exception as e:
-            logger.debug(
-                "deduce_video_duration_from_user_session_minutes failed for user %s: %s",
                 request.user_id,
                 e,
             )

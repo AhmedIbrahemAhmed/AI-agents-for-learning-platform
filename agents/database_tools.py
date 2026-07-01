@@ -312,6 +312,25 @@ def create_study_session(user_id: str, resource_id: Optional[int], summary: str,
         "session_id": int(row[0]),
         "started_at": row[1]
     }
+@tool
+def update_study_session_ended_at(session_id: int, ended_at: datetime) -> dict:
+    """Update the EndedAt timestamp of a StudySessions row."""
+    conn = get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "UPDATE StudySessions SET EndedAt = ? WHERE SessionId = ?",
+        ended_at,
+        session_id,
+    )
+    if cursor.rowcount == 0:
+        conn.rollback()
+        conn.close()
+        return {"error": f"No session found with SessionId {session_id}"}
+
+    conn.commit()
+    conn.close()
+    return {"status": "updated", "session_id": session_id, "ended_at": ended_at.isoformat()}
 
 
 @tool

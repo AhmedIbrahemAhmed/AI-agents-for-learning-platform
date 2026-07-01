@@ -11,6 +11,13 @@ from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 
 
+def normalize_pdf_url(url: str) -> str:
+    m = re.search(r"/file/d/([A-Za-z0-9_-]+)", url)
+    if m:
+        file_id = m.group(1)
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return url
+
 def extract_video_id(url: str) -> Optional[str]:
     for p in [r"(?:v=|\/)([0-9A-Za-z_-]{11})", r"youtu\.be\/([0-9A-Za-z_-]{11})"]:
         m = re.search(p, url)
@@ -215,6 +222,8 @@ def fetch_source_content(source_type: str, url: str) -> dict:
     # PDF support: fetch binary and extract text
     if source_type == "pdf" or (url and url.lower().endswith(".pdf")):
         try:
+            if "drive.google.com" in url:
+                url = normalize_pdf_url(url)
             resp = httpx.get(url, timeout=30.0, follow_redirects=True)
             resp.raise_for_status()
 
