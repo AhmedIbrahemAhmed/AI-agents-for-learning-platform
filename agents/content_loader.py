@@ -337,6 +337,8 @@ def fetch_source_content(source_type: str, url: str) -> dict:
         }
 
     if source_type in {"blog", "article", "webpage"}:
+        if "drive.google.com" in url:
+            url = normalize_pdf_url(url)
         result = fetch_blog_content(url)
         result["source_type"] = "blog"
         result["source_url"] = url
