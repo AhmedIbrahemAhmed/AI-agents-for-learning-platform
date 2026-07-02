@@ -461,3 +461,94 @@ def search_similar_topics(query: str, limit: int = 5) -> list:
             "score": round(r.score, 4),
         })
     return out
+
+
+def get_session_chat_history(session_id: int, limit: int = 200) -> list[dict]:
+    """
+    Retrieve chat history for a specific session_id.
+    Returns a list of dicts with keys: session_id, turn_index, role, text, user_id, created_at
+    """
+    client = _get_qdrant_client()
+    logger = logging.getLogger(__name__)
+    records = []
+    try:
+        scrolled_records, _ = client.scroll(
+            collection_name=CHAT_HISTORY_COLLECTION,
+            limit=limit,
+            with_payload=True
+        )
+        records = [r for r in scrolled_records if hasattr(r, "payload") and r.payload is not None and r.payload.get("session_id") == int(session_id)]
+        logger.debug(f"get_session_chat_history({session_id}): scroll found {len(records)} matching records")
+    except Exception as e:
+        logger.warning(f"get_session_chat_history({session_id}): scroll failed: {e}")
+        records = []
+
+    out = []
+    for r in records:
+        payload = r.payload if hasattr(r, "payload") else (r.get("payload", {}) if isinstance(r, dict) else {})
+        if not payload:
+            continue
+        out.append({
+            "session_id": payload.get("session_id"),
+            "turn_index": payload.get("turn_index"),
+            "role": payload.get("role"),
+            "text": payload.get("text", ""),
+            "user_id": payload.get("user_id"),
+            "created_at": payload.get("created_at", ""),
+        })
+
+    # sort by created_at chronologically (oldest first)
+    # created_at can be float (timestamp) or ISO string, so handle both
+    def get_sort_key(x):
+        ts = x.get("created_at")
+        if isinstance(ts, (int, float)):
+            return ts
+        try:
+            # Try parsing ISO timestamp
+            from datetime import datetime
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0
+    
+    out = sorted(out, key=get_sort_key)
+    logger.debug(f"get_session_chat_history({session_id}): returning {len(out)} turns after parsing")
+    return out
+
+def get_session_topics(session_id: int) -> list[str]:
+    """
+    Retrieve the list of topics associated with a specific session_id from SessionEmbeddings.
+    Returns a list of topic names.
+    """
+    client = _get_qdrant_client()
+    logger = logging.getLogger(__name__)
+    try:
+        # Try direct point retrieval first (session_id is used as point ID)
+        try:
+            points = client.retrieve(
+                collection_name="SessionEmbeddings",
+                ids=[int(session_id)],
+                with_payload=True
+            )
+            if points and len(points) > 0:
+                payload = points[0].payload or {}
+                topics = payload.get("topics", []) if payload else []
+                logger.debug(f"get_session_topics({session_id}): retrieve found topics={topics}")
+                return topics
+        except Exception as e1:
+            logger.debug(f"get_session_topics({session_id}): retrieve failed: {e1}")
+        
+        # Fallback: scroll all records and filter client-side
+        scrolled_records, _ = client.scroll(
+            collection_name="SessionEmbeddings",
+            limit=1000,
+            with_payload=True
+        )
+        for r in scrolled_records:
+            if hasattr(r, "payload") and r.payload is not None and r.payload.get("session_id") == int(session_id):
+                topics = r.payload.get("topics", []) if r.payload else []
+                logger.debug(f"get_session_topics({session_id}): scroll found topics={topics}")
+                return topics
+        logger.debug(f"get_session_topics({session_id}): no matching record found")
+    except Exception as e:
+        logger.warning(f"get_session_topics({session_id}): both methods failed: {e}")
+    return []

@@ -47,21 +47,29 @@ def _get_llm() -> ChatGroq:
 
 @tool
 def append_session_turn(user_id: str, session_id: int, role: str, text: str, max_items: int | None = None) -> Dict[str, Any]:
-    """Append a single turn to the in-memory session cache.
+    """Append a single turn to the in-memory session cache AND immediately persist to Qdrant.
 
     - role should be one of 'user', 'assistant', or 'system'.
-    - This does NOT persist data to any database; it's ephemeral in memory.
+    - Persists immediately (in background) so chat history is available for session resume.
+    - Returns the cache entry count.
     """
     if role not in ("user", "assistant", "system"):
         return {"error": "invalid role; must be 'user', 'assistant', or 'system'"}
 
     with _SESSION_CACHE_LOCK:
         lst = _SESSION_CACHE.setdefault(session_id, [])
-        lst.append({"role": role, "text": text, "user_id": user_id, "ts": time()})
+        turn_entry = {"role": role, "text": text, "user_id": user_id, "ts": time()}
+        lst.append(turn_entry)
         limit = max_items if max_items is not None else _SESSION_CACHE_MAX
         if len(lst) > limit:
             del lst[0 : len(lst) - limit]
-        return {"ok": True, "count": len(lst)}
+        count = len(lst)
+
+    # Immediately persist this single turn to Qdrant in background
+    # so it's available for resume if the session closes
+    _persist_single_turn_async(user_id, session_id, turn_entry)
+    
+    return {"ok": True, "count": count}
 
 
 @tool
@@ -128,6 +136,25 @@ def _persist_session_chat_history_impl(
         "persisted_turns": len(chat_turns),
         "cleared_cache": clear_cache,
     }
+
+
+def _persist_single_turn_async(user_id: str, session_id: int, turn_entry: Dict[str, Any]) -> None:
+    """Immediately persist a single chat turn to Qdrant in background.
+    
+    Called after each append_session_turn so chat is always restorable.
+    """
+    def _run():
+        try:
+            upsert_session_chat_history(
+                session_id=session_id,
+                user_id=user_id,
+                chat_turns=[turn_entry],
+            )
+        except Exception:
+            # Best-effort: failure here doesn't block the conversation
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 @tool
@@ -249,8 +276,8 @@ def chat_session(
         [f"Chunk {i+1}: {c[:1500]}" for i, c in enumerate(context_chunks)]
     )
 
-    prompt = f"""You are a helpful educational assistant. Use ONLY the provided session chunks to answer the user's question.
-If the information is not present in the chunks, say you don't know and suggest follow-up information to provide.
+    prompt = f"""You are a helpful educational assistant. Use the provided session chunks to answer the user's question.
+If the information is not present in the chunks or no relevant information is available, first if the question is related to the provided context answer it else say you don't know but keep the conversation going.
 
 Context (from study session {session_id}):
 {context_text}
@@ -286,17 +313,9 @@ Provide a concise, factual answer Do not hallucinate.
                         "text": answer_text,
                     }
                 )
+                result["persist_queued"] = True  # Turn is persisted immediately by append_session_turn
             except Exception:
                 pass
-
-            # Fire-and-forget: don't make the user wait on a Qdrant write.
-            _persist_session_chat_history_async(
-                user_id=user_id,
-                session_id=session_id,
-                max_items=None,
-                clear_cache=False,
-            )
-            result["persist_queued"] = True
 
         return result
     except Exception as e:

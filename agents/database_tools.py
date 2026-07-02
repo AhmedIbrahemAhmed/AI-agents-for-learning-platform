@@ -69,11 +69,16 @@ def get_or_create_resource(
     url: str,
     title: str,
     duration_minutes: float,
-    topic_name: str,
+    topic_name: Optional[str] = None,
+    topics: Optional[List[str]] = None,
     source_type: str = "youtube",
     difficulty: int = 1,
 ) -> dict:
-    """Insert or return an existing resource row and upsert its embedding to Qdrant."""
+    """Insert or return an existing resource row and upsert its embedding to Qdrant.
+
+    New: accepts `topics` (list of topic names). Backwards-compatible `topic_name`
+    parameter is still accepted; `topics` takes precedence when provided.
+    """
     conn = get_conn()
     cursor = conn.cursor()
 
@@ -107,13 +112,51 @@ def get_or_create_resource(
     finally:
         conn.close()
 
+    # Map topics: prefer explicit `topics` list, fallback to single `topic_name`
+    topics_list: List[str] = []
+    if topics:
+        topics_list = [t for t in topics if t]
+    elif topic_name:
+        topics_list = [topic_name]
+
+    # Persist Resource->Topic coverage links (best-effort)
+    if topics_list:
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            for tname in topics_list:
+                try:
+                    t_resp = get_or_create_topic.invoke({"topic_name": tname, "create_if_missing": True})
+                    if isinstance(t_resp, dict) and t_resp.get("topic_id"):
+                        tid = int(t_resp["topic_id"])
+                        # avoid duplicate coverage rows
+                        cur.execute(
+                            "SELECT 1 FROM ResourceTopicCoverage WHERE ResourceId = ? AND TopicId = ?",
+                            resource_id,
+                            tid,
+                        )
+                        if not cur.fetchone():
+                            cur.execute(
+                                "INSERT INTO ResourceTopicCoverage (ResourceId, TopicId, CoverageScore) VALUES (?, ?, ?)",
+                                resource_id,
+                                tid,
+                                1.0,
+                            )
+                except Exception:
+                    # skip problematic topic
+                    continue
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
     # Upsert into Qdrant (idempotent, best-effort)
     if QDRANT_AVAILABLE and upsert_resource is not None:
         try:
             upsert_resource(
                 resource_id=resource_id,
                 title=title,
-                topics=[topic_name],
+                topics=topics_list,
                 difficulty=difficulty,
                 url=url,
             )
@@ -1041,4 +1084,14 @@ def fetch_all_sessions() -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
+def get_session_summary(session_id: int) -> Optional[str]:
+    """Return the SessionSummary for a given SessionId, or None if not found."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT SessionSummary FROM StudySessions WHERE SessionId = ?", session_id)
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
 

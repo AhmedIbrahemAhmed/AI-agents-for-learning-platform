@@ -20,6 +20,7 @@ from database_tools import (
     save_quiz_results,
     get_resource_id_for_session,
     get_resource_by_id,
+    get_session_summary,
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -38,6 +39,8 @@ from qdrant_helper import (
     upsert_session,
     upsert_session_chunks,
     upsert_session_chat_history,
+    get_session_chat_history,
+    get_session_topics,
 )
 from recommendation_agent import (
     generate_roadmap_for_user,
@@ -277,7 +280,7 @@ def content_prepare(request: ContentPrepareRequest):
                 "url": request.url or "",
                 "title": result.get("title") or request.url,
                 "duration_minutes": result.get("duration_minutes", 0.0),
-                "topic_name": (topics or [None])[0],
+                "topics": topics or [],
                 "source_type": request.source_type,
             }
             resource_result = get_or_create_resource.invoke(res_payload)
@@ -290,7 +293,7 @@ def content_prepare(request: ContentPrepareRequest):
             ):
                 try:
                     fallback = res_payload.copy()
-                    fallback["topic_name"] = None
+                    fallback["topics"] = []
                     resource_result = get_or_create_resource.invoke(fallback)
                     resource_id = resource_result.get("resource_id")
                 except Exception as e:
@@ -797,3 +800,48 @@ def cv_generate(req: CVGenerateRequest):
         )
 
     return {"tex_path": tex_path, "latex": latex}
+
+
+@api.get("/session/data")
+def get_session_data(session_id: int):
+    """Return session summary, chat history, chunks and topics."""
+    try:
+        summary = get_session_summary(session_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve session summary: {e}",
+        )
+
+    try:
+        chat_history = get_session_chat_history(session_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve session chat history: {e}",
+        )
+
+    try:
+        topics = get_session_topics(session_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve session topics: {e}",
+        )
+
+    try:
+        chunks = get_chunks_for_session(session_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve session content chunks: {e}",
+        )
+
+    return {
+        "session_id": session_id,
+        "summary": summary,
+        "chat_history": chat_history,
+        "topics": topics,
+        "content_chunks": chunks,
+    }
+    

@@ -139,7 +139,7 @@ def run_quiz_agent(url: str, user_id: str, source_type: str = "youtube"):
         "url": url,
         "title": title,
         "duration_minutes": duration_minutes,
-        "topic_name": topics_array[0],
+        "topics": topics_array,
         "source_type": source_type,
     })
 
