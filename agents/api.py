@@ -20,7 +20,7 @@ from database_tools import (
     save_quiz_results,
     get_resource_id_for_session,
     get_resource_by_id,
-    get_session_summary,
+    get_session_data,
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -803,14 +803,14 @@ def cv_generate(req: CVGenerateRequest):
 
 
 @api.get("/session/data")
-def get_session_data(session_id: int):
-    """Return session summary, chat history, chunks and topics."""
+def read_session_data(session_id: int):
+    """Return session summary, chat history, chunks, topics, url, source_type, duration, channel, video_id, title and description."""
     try:
-        summary = get_session_summary(session_id)
+        session_data = get_session_data(session_id)
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to retrieve session summary: {e}",
+            detail=f"Failed to retrieve session data: {e}",
         )
 
     try:
@@ -836,12 +836,34 @@ def get_session_data(session_id: int):
             status_code=500,
             detail=f"Failed to retrieve session content chunks: {e}",
         )
+    
+    try:
+        content_data = None
+        # 1. Ensure session_data is not None before using it
+        if session_data:
+            s_type = session_data.get("source_type")
+            s_url = session_data.get("url")
+            
+            # 2. Explicitly type-check that s_type and s_url are actual strings
+            if isinstance(s_type, str) and isinstance(s_url, str) and s_type == "youtube":
+                content_data = get_content_duration(s_type, s_url)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve content metadata: {e}",
+        )
 
     return {
         "session_id": session_id,
-        "summary": summary,
+        "summary": session_data.get("summary") if session_data else None,
+        "type": session_data.get("type") if session_data else None,
+        "url": session_data.get("url") if session_data else None,
+        "title": session_data.get("title") if session_data else None,
         "chat_history": chat_history,
         "topics": topics,
         "content_chunks": chunks,
+        "content_duration": content_data.get("duration") if content_data else None,
+        "channel": content_data.get("channel") if content_data else None,
+        "description": content_data.get("description") if content_data else None,
     }
     

@@ -1084,14 +1084,21 @@ def fetch_all_sessions() -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
-def get_session_summary(session_id: int) -> Optional[str]:
-    """Return the SessionSummary for a given SessionId, or None if not found."""
+def get_session_data(session_id: int) -> Optional[Dict[str, Any]]:
+    """Return the SessionSummary, type, url and title for a given SessionId, or None if not found."""
     conn = get_conn()
     try:
         cur = conn.cursor()
-        cur.execute("SELECT SessionSummary FROM StudySessions WHERE SessionId = ?", session_id)
+        cur.execute("SELECT SessionSummary, Type, Url, Title FROM StudySessions join Resources on StudySessions.ResourceId = Resources.ResourceId WHERE SessionId = ?", session_id)
         row = cur.fetchone()
-        return row[0] if row else None
+        if row:
+            return {
+                "summary": row[0],
+                "type": row[1],
+                "url": row[2],
+                "title": row[3]
+            }
+        return None
     finally:
         conn.close()
 
